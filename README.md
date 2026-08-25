@@ -1,8 +1,8 @@
 # Komari NodeGet Compatibility Layer
 
-将遵循 Komari 公共主题规范的主题 ZIP 转换为 NodeGet 可导入主题包。项目同时提供 Cloudflare Worker 在线转换器和 Bun CLI，采用 MIT 许可证开源。
+将遵循 Komari 公共主题规范的主题 ZIP 转换为 NodeGet 可导入主题包。项目提供浏览器转换器、Bun CLI，以及可供 NodeGet 直接导入的 Cloudflare Worker 远程分发地址，采用 MIT 许可证开源。
 
-在线版只在访问者浏览器中解压、转换和重新打包主题。Cloudflare Worker 负责静态资源托管与公开功能配置，不接收主题文件，也不保存 NodeGet Token。
+本地 ZIP 模式只在访问者浏览器中解压、转换和重新打包，文件不会上传。远程分发模式由 Worker 下载白名单内的公开 GitHub Release ZIP，将转换结果保存为私有 R2 数据包，始终不接收或保存 NodeGet Token。
 
 ## 当前能力
 
@@ -10,6 +10,7 @@
 - 生成 `nodeget-theme.json`、`nodeget-theme-files.json`、`config.json` 和 NodeGet 安装 ZIP。
 - 注入公共 HTTP、RPC2 与实时状态兼容运行时，无需主题源码。
 - 转换 Komari managed 主题设置为 NodeGet `user_preferences_form`。
+- 将 GitHub 最新 Release 映射为稳定的 NodeGet 主题站点 URL，并使用 R2 缓存。
 - 支持多个 NodeGet 站点，并为跨站点节点生成无冲突 ID。
 - 拒绝管理员、登录、终端及写操作，不把它们透传到 NodeGet。
 
@@ -28,6 +29,18 @@
 导入主题后，在 NodeGet 主题管理面板配置 RPC 地址和只读 Token。转换器、Cloudflare Worker、GitHub Actions 与仓库均不需要真实 Token。
 
 NodeGet 当前会把主题配置提供给访问者浏览器，因此公开主题 Token 仍然可见，必须使用最小只读权限。参考 [docs/nodeget-minimal-token.md](docs/nodeget-minimal-token.md)。
+
+## NodeGet 远程导入
+
+启用仓库白名单后，每个主题会获得一个稳定地址：
+
+```text
+https://<WORKER_DOMAIN>/themes/github/<OWNER>/<REPOSITORY>/latest
+```
+
+把该地址填入 NodeGet 主题管理的“从远程导入”，或使用转换器页面生成的“在 NodeGet 导入”链接。首次访问时 Worker 会解析 GitHub 最新 Release、转换唯一或最匹配的 ZIP 资源并写入 R2；后续文件直接从 R2 Range 读取。
+
+NodeGet 会把远程文件复制到自己的主题桶，不会持续挂载 Worker。上游发布新版后，在 NodeGet 主题管理中点击“从远程更新”即可获取最新版；这不是后台静默自动更新。完整说明见 [docs/remote-distribution.md](docs/remote-distribution.md)。
 
 ## 本地开发
 
@@ -54,23 +67,26 @@ bun run convert -- input-komari-theme.zip -o output-nodeget-theme.zip
 
 ```bash
 bun run check
+bunx wrangler r2 bucket create komari-nodeget-theme-cache
 bun run deploy
 ```
 
-项目使用 Workers Static Assets，部署目录为 `dist/web`。`/api/config` 只返回公开功能开关，`/api/health` 返回运行状态；不存在 NodeGet 代理接口。
+项目使用 Workers Static Assets 和私有 R2 绑定。部署目录为 `dist/web`；`/api/config` 只返回公开功能开关和仓库白名单，`/api/health` 返回运行状态。远程路由只允许读取配置白名单中的公开 GitHub Release，不存在任意 URL 或 NodeGet 代理接口。
 
 ### GitHub Actions
 
 推送到 `main` 或手动运行 `Deploy Cloudflare Worker` workflow 会执行完整检查并部署。需要在 GitHub 仓库的 Actions secrets 或 `production` environment 中配置：
 
-- `CLOUDFLARE_API_TOKEN`：可编辑目标 Worker 的 Cloudflare API Token。
+- `CLOUDFLARE_API_TOKEN`：需要 `Workers Scripts: Edit`、`Workers R2 Storage: Edit` 和 `Account Settings: Read`。
 - `CLOUDFLARE_ACCOUNT_ID`：目标 Cloudflare Account ID。
 
 可选功能使用 GitHub Actions repository variables 配置：
 
 - `ACG_BACKGROUND_ENABLED`：设为 `true` 时启用 ACG 背景；未配置或其他值均按 `false` 部署。
+- `ALLOWED_GITHUB_REPOSITORIES`：允许远程转换的公开仓库，使用不带空格的逗号分隔 `owner/repo` 列表；未配置时关闭远程分发。
+- `RELEASE_CHECK_TTL_SECONDS`：检查 GitHub 最新 Release 的间隔，允许 60–86400 秒，默认 300 秒。
 
-Pull Request 和非 `main` 分支由 `CI` workflow 执行类型检查、测试、构建及 Wrangler dry run，不部署。
+部署 workflow 会幂等创建 `komari-nodeget-theme-cache` R2 桶。Pull Request 和非 `main` 分支由 `CI` workflow 执行类型检查、测试、构建及 Wrangler dry run，不部署。
 
 ### ACG 背景开关
 
@@ -89,6 +105,8 @@ ACG_BACKGROUND_ENABLED=true
 ## 安全边界
 
 - 浏览器转换上限为 64 MB，核心转换器上限为 100 MB 输入、250 MB 解压内容和 10,000 个文件。
+- 远程分发上限为 32 MB ZIP、72 MB 转换内容和 5,000 个文件；首次转换的 CPU 消耗可能超过 Workers Free 的 10 ms 限制，大型主题可能需要 Workers Paid。
+- 远程下载只接受白名单内的 GitHub Release ZIP，R2 桶保持私有，不提供任意 URL 代理。
 - ZIP 路径遍历、重复路径、缺失主题清单与缺失入口会被拒绝。
 - 转换后的运行时只实现公共监控读取能力。
 - 真实 Token、`.dev.vars`、`.env`、构建产物和 Wrangler 本地状态不会进入 Git。

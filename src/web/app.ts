@@ -4,9 +4,12 @@ import {
   Check,
   CircleCheck,
   CircleX,
+  Copy,
   createElement,
   Download,
+  ExternalLink,
   FileArchive,
+  Link2,
   LoaderCircle,
   LockKeyhole,
   Moon,
@@ -48,6 +51,8 @@ type ViewState = 'empty' | 'busy' | 'error' | 'result'
 
 interface PublicConfig {
   acg_background_enabled?: boolean
+  remote_theme_enabled?: boolean
+  remote_theme_repositories?: string[]
 }
 
 function element<T extends HTMLElement>(id: string): T {
@@ -101,6 +106,11 @@ const downloadButton = document.getElementById('download-button') as HTMLAnchorE
 const backgroundMedia = element('background-media')
 const backgroundRefresh = element<HTMLButtonElement>('background-refresh')
 const themeToggle = element<HTMLButtonElement>('theme-toggle')
+const remoteDistribution = element('remote-distribution')
+const remoteRepository = document.getElementById('remote-repository') as HTMLSelectElement
+const remoteThemeUrl = document.getElementById('remote-theme-url') as HTMLInputElement
+const copyRemoteUrl = element<HTMLButtonElement>('copy-remote-url')
+const nodeGetImportLink = document.getElementById('nodeget-import-link') as HTMLAnchorElement
 
 let activeWorker: Worker | null = null
 let activeDownloadUrl: string | null = null
@@ -288,21 +298,80 @@ function updateBackgroundControls(): void {
   backgroundRefresh.disabled = !backgroundAvailable
 }
 
-async function initializeBackground(): Promise<void> {
+function validRepository(value: string): boolean {
+  const [owner, repo, ...extra] = value.split('/')
+  return extra.length === 0
+    && /^[A-Za-z0-9_.-]+$/.test(owner ?? '')
+    && /^[A-Za-z0-9_.-]+$/.test(repo ?? '')
+}
+
+function updateRemoteUrl(): void {
+  const repository = remoteRepository.value
+  if (!validRepository(repository)) {
+    remoteThemeUrl.value = ''
+    nodeGetImportLink.removeAttribute('href')
+    return
+  }
+  const [owner, repo] = repository.split('/') as [string, string]
+  const themeUrl = new URL(`/themes/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/latest`, location.origin).href
+  remoteThemeUrl.value = themeUrl
+  nodeGetImportLink.href = `https://dash.nodeget.com/#/dashboard/theme-management?add=${encodeURIComponent(themeUrl)}`
+}
+
+function initializeRemoteDistribution(config: PublicConfig): void {
+  const repositories = config.remote_theme_enabled
+    ? (config.remote_theme_repositories ?? []).filter(validRepository)
+    : []
+  remoteRepository.replaceChildren()
+  for (const repository of repositories) {
+    const option = document.createElement('option')
+    option.value = repository
+    option.textContent = repository
+    remoteRepository.append(option)
+  }
+  remoteDistribution.hidden = repositories.length === 0
+  if (repositories.length > 0)
+    updateRemoteUrl()
+}
+
+async function initializePublicFeatures(): Promise<void> {
+  let config: PublicConfig = {}
   try {
     const response = await fetch('/api/config', { cache: 'no-store' })
     if (!response.ok)
       throw new Error(`HTTP ${response.status}`)
-    const config = await response.json() as PublicConfig
+    config = await response.json() as PublicConfig
     backgroundAvailable = config.acg_background_enabled === true
   }
   catch {
     backgroundAvailable = false
   }
 
+  initializeRemoteDistribution(config)
   updateBackgroundControls()
   if (backgroundAvailable)
     refreshBackground()
+}
+
+async function copyRemoteThemeUrl(): Promise<void> {
+  if (!remoteThemeUrl.value)
+    return
+  try {
+    await navigator.clipboard.writeText(remoteThemeUrl.value)
+  }
+  catch {
+    remoteThemeUrl.focus()
+    remoteThemeUrl.select()
+    document.execCommand('copy')
+  }
+  setIcon('icon-copy-remote', Check)
+  copyRemoteUrl.title = '已复制'
+  copyRemoteUrl.setAttribute('aria-label', '已复制主题地址')
+  window.setTimeout(() => {
+    setIcon('icon-copy-remote', Copy)
+    copyRemoteUrl.title = '复制主题地址'
+    copyRemoteUrl.setAttribute('aria-label', '复制主题地址')
+  }, 1_500)
 }
 
 function backgroundEndpoint(): string {
@@ -354,9 +423,13 @@ setIcon('icon-check-token', Check)
 setIcon('icon-warning', TriangleAlert)
 setIcon('icon-reset', RotateCcw)
 setIcon('icon-download', Download)
+setIcon('icon-remote-link', Link2)
+setIcon('icon-copy-remote', Copy)
+setIcon('icon-open-nodeget', ExternalLink)
+setIcon('icon-remote-update', RefreshCw)
 initializeTheme()
 updateBackgroundControls()
-void initializeBackground()
+void initializePublicFeatures()
 
 dropZone.addEventListener('click', selectedUpload)
 dropZone.addEventListener('keydown', (event) => {
@@ -401,3 +474,5 @@ themeToggle.addEventListener('click', () => {
   updateThemeIcon()
 })
 backgroundRefresh.addEventListener('click', refreshBackground)
+remoteRepository.addEventListener('change', updateRemoteUrl)
+copyRemoteUrl.addEventListener('click', () => void copyRemoteThemeUrl())

@@ -33,10 +33,16 @@ jobs:
       - name: Check project
         run: bun run check
 
+      - name: Ensure R2 theme cache
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: bun run setup:r2
+
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           packageManager: bun
-          command: deploy --var ACG_BACKGROUND_ENABLED:${{ vars.ACG_BACKGROUND_ENABLED || 'false' }}
+          command: deploy --var ACG_BACKGROUND_ENABLED:${{ vars.ACG_BACKGROUND_ENABLED || 'false' }} --var ALLOWED_GITHUB_REPOSITORIES:${{ vars.ALLOWED_GITHUB_REPOSITORIES || 'none' }} --var RELEASE_CHECK_TTL_SECONDS:${{ vars.RELEASE_CHECK_TTL_SECONDS || '300' }}

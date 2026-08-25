@@ -19,9 +19,10 @@ describe('manifest conversion', () => {
         ],
       },
     }))
-    const converted = convertManifests(source)
+    const converted = convertManifests(source, { distPage: 'https://adapter.example/themes/github/test/theme/latest' })
     expect(converted.nodeget.name).toBe('NodeGet 测试主题')
     expect(converted.nodeget.short).toBe('NG-Test-Theme')
+    expect(converted.nodeget.dist_page).toBe('https://adapter.example/themes/github/test/theme/latest')
     expect(converted.compat.themeSettingsDefaults).toEqual({ dense: true, nodes: ['a', 'b'], palette: 'blue' })
     expect(converted.compat.themeSettingArrayKeys).toEqual(['nodes'])
     expect(converted.defaultConfig.user_preferences).toMatchObject({ nodes: 'a,b', dense: true })

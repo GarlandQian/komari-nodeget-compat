@@ -1,2 +1,4 @@
 # Optional. The open-source default is disabled.
 ACG_BACKGROUND_ENABLED=false
+ALLOWED_GITHUB_REPOSITORIES=sanrokamlan-prog/komari-theme-Glassmorphism
+RELEASE_CHECK_TTL_SECONDS=300

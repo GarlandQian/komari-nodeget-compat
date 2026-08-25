@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
-import { convertThemeArchive } from '../src/converter/archive'
+import { convertThemeArchive, convertThemeEntries } from '../src/converter/archive'
 
 function sourceTheme(): Uint8Array {
   return zipSync({
@@ -53,5 +53,18 @@ describe('theme archive conversion', () => {
 
     const missingManifest = zipSync({ 'dist/index.html': strToU8('<html></html>') })
     expect(() => convertThemeArchive(missingManifest, { runtime: strToU8('runtime') })).toThrow('komari-theme.json')
+  })
+
+  it('returns reusable converted entries for remote distribution', () => {
+    const result = convertThemeEntries(sourceTheme(), {
+      runtime: strToU8('runtime'),
+      distPage: 'https://adapter.example/themes/github/test/theme/latest',
+      limits: { maxFiles: 20 },
+    })
+    expect(result.entries['index.html']).toBeDefined()
+    expect(result.entries['nodeget-theme-files.json']).toBeDefined()
+    const manifest = JSON.parse(strFromU8(result.entries['nodeget-theme.json']!)) as Record<string, unknown>
+    expect(manifest.dist_page).toBe('https://adapter.example/themes/github/test/theme/latest')
+    expect(result.outputFileCount).toBe(Object.keys(result.entries).length)
   })
 })
