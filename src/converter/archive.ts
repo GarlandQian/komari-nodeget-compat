@@ -6,12 +6,20 @@ export const MAX_INPUT_BYTES = 100 * 1024 * 1024
 export const MAX_UNCOMPRESSED_BYTES = 250 * 1024 * 1024
 export const MAX_ARCHIVE_FILES = 10_000
 
-export interface ConvertArchiveOptions {
-  runtime: Uint8Array
+export interface ArchiveLimits {
+  maxInputBytes: number
+  maxUncompressedBytes: number
+  maxFiles: number
 }
 
-export interface ConvertArchiveResult {
-  archive: Uint8Array
+export interface ConvertArchiveOptions {
+  runtime: Uint8Array
+  distPage?: string
+  limits?: Partial<ArchiveLimits>
+  scanSourceWarnings?: boolean
+}
+
+export interface ConversionMetadata {
   warnings: string[]
   sourceName: string
   sourceShort: string
@@ -19,6 +27,20 @@ export interface ConvertArchiveResult {
   outputShort: string
   inputFileCount: number
   outputFileCount: number
+}
+
+export interface ConvertEntriesResult extends ConversionMetadata {
+  entries: Record<string, Uint8Array>
+}
+
+export interface ConvertArchiveResult extends ConversionMetadata {
+  archive: Uint8Array
+}
+
+const DEFAULT_LIMITS: ArchiveLimits = {
+  maxInputBytes: MAX_INPUT_BYTES,
+  maxUncompressedBytes: MAX_UNCOMPRESSED_BYTES,
+  maxFiles: MAX_ARCHIVE_FILES,
 }
 
 function safeArchivePath(path: string): string {
@@ -30,8 +52,38 @@ function safeArchivePath(path: string): string {
   return segments.filter(segment => segment && segment !== '.').join('/')
 }
 
-function normalizeEntries(entries: Record<string, Uint8Array>): Record<string, Uint8Array> {
-  const normalized: Record<string, Uint8Array> = {}
+function resolveLimits(overrides: Partial<ArchiveLimits> | undefined): ArchiveLimits {
+  const limits = { ...DEFAULT_LIMITS, ...overrides }
+  for (const [name, value] of Object.entries(limits)) {
+    if (!Number.isSafeInteger(value) || value <= 0)
+      throw new Error(`Invalid archive limit ${name}`)
+  }
+  return limits
+}
+
+function unzipEntries(input: Uint8Array, limits: ArchiveLimits): Record<string, Uint8Array> {
+  let declaredBytes = 0
+  let declaredFiles = 0
+  return unzipSync(input, {
+    filter(file) {
+      if (file.name.endsWith('/') || file.name.endsWith('\\'))
+        return false
+      declaredBytes += file.originalSize
+      declaredFiles += 1
+      if (declaredBytes > limits.maxUncompressedBytes)
+        throw new Error(`Theme expands beyond ${limits.maxUncompressedBytes / 1024 / 1024} MiB safety limit`)
+      if (declaredFiles > limits.maxFiles)
+        throw new Error(`Theme contains more than ${limits.maxFiles} files`)
+      return true
+    },
+  })
+}
+
+function normalizeEntries(
+  entries: Record<string, Uint8Array>,
+  limits: ArchiveLimits,
+): Record<string, Uint8Array> {
+  const normalized = Object.create(null) as Record<string, Uint8Array>
   let totalBytes = 0
   let fileCount = 0
   for (const [path, content] of Object.entries(entries)) {
@@ -43,12 +95,12 @@ function normalizeEntries(entries: Record<string, Uint8Array>): Record<string, U
     if (safePath in normalized)
       throw new Error(`Theme contains duplicate archive path: ${safePath}`)
     totalBytes += content.byteLength
-    if (totalBytes > MAX_UNCOMPRESSED_BYTES)
-      throw new Error(`Theme expands beyond ${MAX_UNCOMPRESSED_BYTES / 1024 / 1024} MiB safety limit`)
+    if (totalBytes > limits.maxUncompressedBytes)
+      throw new Error(`Theme expands beyond ${limits.maxUncompressedBytes / 1024 / 1024} MiB safety limit`)
     normalized[safePath] = content
     fileCount += 1
-    if (fileCount > MAX_ARCHIVE_FILES)
-      throw new Error(`Theme contains more than ${MAX_ARCHIVE_FILES} files`)
+    if (fileCount > limits.maxFiles)
+      throw new Error(`Theme contains more than ${limits.maxFiles} files`)
   }
   return normalized
 }
@@ -75,16 +127,17 @@ function sourceWarnings(entries: Record<string, Uint8Array>, themeShort: string)
   return [...new Set(warnings)]
 }
 
-export function convertThemeArchive(
+export function convertThemeEntries(
   input: Uint8Array,
   options: ConvertArchiveOptions,
-): ConvertArchiveResult {
-  if (input.byteLength > MAX_INPUT_BYTES)
-    throw new Error(`Input theme exceeds ${MAX_INPUT_BYTES / 1024 / 1024} MiB safety limit`)
+): ConvertEntriesResult {
+  const limits = resolveLimits(options.limits)
+  if (input.byteLength > limits.maxInputBytes)
+    throw new Error(`Input theme exceeds ${limits.maxInputBytes / 1024 / 1024} MiB safety limit`)
   if (!options.runtime.byteLength)
     throw new Error('Compatibility runtime bundle is empty')
 
-  const sourceEntries = normalizeEntries(unzipSync(input))
+  const sourceEntries = normalizeEntries(unzipEntries(input, limits), limits)
   const manifestBytes = sourceEntries['komari-theme.json']
   if (!manifestBytes)
     throw new Error('Komari theme ZIP must contain komari-theme.json at its root')
@@ -93,8 +146,10 @@ export function convertThemeArchive(
     throw new Error('Komari theme ZIP must contain dist/index.html')
 
   const manifest = parseKomariManifest(strFromU8(manifestBytes))
-  const converted = convertManifests(manifest)
-  const output: Record<string, Uint8Array> = {}
+  const converted = convertManifests(manifest, {
+    ...(options.distPage ? { distPage: options.distPage } : {}),
+  })
+  const output = Object.create(null) as Record<string, Uint8Array>
 
   for (const [path, content] of Object.entries(sourceEntries)) {
     if (path.startsWith('dist/')) {
@@ -126,11 +181,10 @@ export function convertThemeArchive(
   output['nodeget-theme-files.json'] = prettyJson(fileNames)
   const warnings = [
     ...converted.warnings,
-    ...sourceWarnings(sourceEntries, manifest.short),
+    ...(options.scanSourceWarnings === false ? [] : sourceWarnings(sourceEntries, manifest.short)),
   ]
-  const archive = zipSync(output, { level: 9 })
   return {
-    archive,
+    entries: output,
     warnings,
     sourceName: converted.compat.source.name,
     sourceShort: manifest.short,
@@ -138,5 +192,17 @@ export function convertThemeArchive(
     outputShort: String(converted.nodeget.short),
     inputFileCount: Object.keys(sourceEntries).length,
     outputFileCount: Object.keys(output).length,
+  }
+}
+
+export function convertThemeArchive(
+  input: Uint8Array,
+  options: ConvertArchiveOptions,
+): ConvertArchiveResult {
+  const converted = convertThemeEntries(input, options)
+  const { entries, ...metadata } = converted
+  return {
+    archive: zipSync(entries, { level: 9 }),
+    ...metadata,
   }
 }

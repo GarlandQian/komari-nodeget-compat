@@ -42,6 +42,10 @@ export interface ConvertedManifests {
   warnings: string[]
 }
 
+export interface ConvertManifestOptions {
+  distPage?: string
+}
+
 const STANDARD_KEYS = new Set(['site_name', 'site_title', 'site_description', 'footer'])
 const DIRECT_TYPES = new Set(['string', 'number', 'select', 'switch', 'title'])
 const ARRAY_TYPES = new Set(['nodes', 'pingtasks'])
@@ -63,7 +67,10 @@ export function parseKomariManifest(text: string): KomariThemeManifest {
   return value as unknown as KomariThemeManifest
 }
 
-export function convertManifests(manifest: KomariThemeManifest): ConvertedManifests {
+export function convertManifests(
+  manifest: KomariThemeManifest,
+  options: ConvertManifestOptions = {},
+): ConvertedManifests {
   const sourceName = localizedText(manifest.name, manifest.short)
   const sourceDescription = localizedText(manifest.description, `Converted Komari theme ${sourceName}`)
   const sourceAuthor = localizedText(manifest.author, 'Unknown')
@@ -171,6 +178,7 @@ export function convertManifests(manifest: KomariThemeManifest): ConvertedManife
     description: `${sourceDescription} (Komari compatibility package)`,
     author: sourceAuthor,
     ...(manifest.url ? { repository: manifest.url } : {}),
+    ...(options.distPage ? { dist_page: options.distPage } : {}),
     version,
     license: '',
     preview: previewOutputName(manifest.preview),

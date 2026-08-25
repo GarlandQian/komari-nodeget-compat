@@ -147,6 +147,37 @@
         </section>
       </main>
 
+      <section id="remote-distribution" class="remote-distribution" aria-labelledby="remote-title" hidden>
+        <div class="remote-heading">
+          <div>
+            <p class="eyebrow">REMOTE DISTRIBUTION</p>
+            <h2 id="remote-title">NodeGet 远程主题地址</h2>
+          </div>
+          <span class="remote-status"><span id="icon-remote-link" class="icon-slot"></span>GitHub latest · R2</span>
+        </div>
+
+        <div class="remote-controls">
+          <label for="remote-repository">Komari 主题仓库</label>
+          <select id="remote-repository"></select>
+
+          <label for="remote-theme-url">主题站点 URL</label>
+          <div class="remote-url-row">
+            <input id="remote-theme-url" type="url" readonly>
+            <button id="copy-remote-url" class="icon-button bordered" type="button" aria-label="复制主题地址" title="复制主题地址">
+              <span id="icon-copy-remote" class="icon-slot"></span>
+            </button>
+            <a id="nodeget-import-link" class="primary-button" href="#" target="_blank" rel="noreferrer">
+              <span id="icon-open-nodeget" class="icon-slot"></span>在 NodeGet 导入
+            </a>
+          </div>
+        </div>
+
+        <div class="remote-update-note">
+          <span id="icon-remote-update" class="icon-slot"></span>
+          <span>上游发布新版后，在 NodeGet 主题管理中执行“从远程更新”。</span>
+        </div>
+      </section>
+
       <footer class="app-footer">
         <span>MIT · Open source</span>
         <a id="background-attribution" href="https://blog.yeqing.net/acg-api/" target="_blank" rel="noreferrer" hidden>背景来源：夜轻 ACG API</a>

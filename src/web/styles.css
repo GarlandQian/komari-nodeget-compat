@@ -228,7 +228,7 @@ a:focus-visible,
   grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
   width: min(1180px, calc(100% - 36px));
   min-height: 620px;
-  margin: clamp(24px, 5vh, 52px) auto;
+  margin: clamp(24px, 5vh, 52px) auto 18px;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -673,6 +673,115 @@ a:focus-visible,
   margin-top: 22px;
 }
 
+.remote-distribution {
+  display: grid;
+  width: min(1180px, calc(100% - 36px));
+  gap: 22px;
+  margin: 0 auto clamp(24px, 5vh, 52px);
+  padding: clamp(22px, 3vw, 34px);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  backdrop-filter: saturate(110%) blur(18px);
+}
+
+.remote-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.remote-heading h2 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.25;
+}
+
+.remote-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  gap: 7px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--accent-text);
+  background: var(--surface-solid);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.remote-controls {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.4fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 10px 16px;
+}
+
+.remote-controls label {
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.remote-controls select,
+.remote-controls input {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  color: var(--text);
+  background: var(--surface-solid);
+}
+
+.remote-controls input {
+  overflow: hidden;
+  color: var(--text-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+}
+
+.remote-controls select:focus-visible,
+.remote-controls input:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--focus) 32%, transparent);
+  outline-offset: 1px;
+}
+
+.remote-url-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.remote-url-row .icon-button {
+  height: 42px;
+}
+
+.remote-url-row .primary-button {
+  min-height: 42px;
+}
+
+.remote-update-note {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.remote-update-note .icon-slot {
+  color: var(--accent-text);
+}
+
 .app-footer {
   display: flex;
   align-items: center;
@@ -723,6 +832,10 @@ a:focus-visible,
   .token-boundary {
     margin-top: 18px;
   }
+
+  .remote-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 560px) {
@@ -754,6 +867,30 @@ a:focus-visible,
   .workspace {
     width: calc(100% - 20px);
     margin: 12px auto 16px;
+  }
+
+  .remote-distribution {
+    width: calc(100% - 20px);
+    gap: 18px;
+    margin-bottom: 16px;
+    padding: 22px 18px;
+  }
+
+  .remote-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .remote-status {
+    align-self: flex-start;
+  }
+
+  .remote-url-row {
+    grid-template-columns: minmax(0, 1fr) 38px;
+  }
+
+  .remote-url-row .primary-button {
+    grid-column: 1 / -1;
   }
 
   .workspace-pane {

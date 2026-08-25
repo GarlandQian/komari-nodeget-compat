@@ -1,6 +1,6 @@
 {
   "name": "komari-nodeget-compat",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -17,6 +17,7 @@
     "dev": "bun run build && wrangler dev",
     "deploy": "bun run build && wrangler deploy",
     "deploy:check": "wrangler deploy --dry-run",
+    "setup:r2": "bun run scripts/ensure-r2.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun test && bun run build"
