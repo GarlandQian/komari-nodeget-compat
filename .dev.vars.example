@@ -1,0 +1,2 @@
+# Optional. The open-source default is disabled.
+ACG_BACKGROUND_ENABLED=false
