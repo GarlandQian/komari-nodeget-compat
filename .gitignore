@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+*.tgz
+.DS_Store
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+!.env.example

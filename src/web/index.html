@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#f4f7f5">
+    <meta name="description" content="Komari 主题到 NodeGet 主题的本地转换工具">
+    <title>Komari to NodeGet</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+  </head>
+  <body>
+    <div id="background-media" class="background-media" aria-hidden="true"></div>
+
+    <div class="app-shell">
+      <header class="app-header">
+        <a class="brand" href="/" aria-label="Komari to NodeGet 首页">
+          <span class="brand-mark" aria-hidden="true">K/N</span>
+          <span class="brand-copy">
+            <strong>Komari to NodeGet</strong>
+            <span>Theme adapter</span>
+          </span>
+        </a>
+
+        <div class="header-actions" aria-label="页面工具">
+          <span class="local-status"><span id="icon-shield" class="icon-slot"></span>本地处理</span>
+          <button id="background-refresh" class="icon-button" type="button" aria-label="更换背景" title="更换背景" hidden>
+            <span id="icon-background-refresh" class="icon-slot"></span>
+          </button>
+          <button id="theme-toggle" class="icon-button" type="button" aria-label="切换深浅色" title="切换深浅色">
+            <span id="icon-theme" class="icon-slot"></span>
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="workspace-pane input-pane" aria-labelledby="input-title">
+          <div class="pane-heading">
+            <div>
+              <p class="eyebrow">INPUT</p>
+              <h1 id="input-title">Komari 主题包</h1>
+            </div>
+            <span class="step-number" aria-hidden="true">01</span>
+          </div>
+
+          <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="选择或拖放 Komari 主题 ZIP">
+            <input id="file-input" type="file" accept=".zip,application/zip" hidden>
+            <span class="drop-icon"><span id="icon-upload" class="icon-slot"></span></span>
+            <strong>选择 Komari 主题 ZIP</strong>
+            <span class="drop-secondary">或拖放到这里</span>
+            <span class="drop-limit">ZIP · 最大 64 MB</span>
+          </div>
+
+          <div id="selected-file" class="selected-file" hidden>
+            <span class="file-icon"><span id="icon-file" class="icon-slot"></span></span>
+            <div class="file-copy">
+              <strong id="selected-file-name"></strong>
+              <span id="selected-file-size"></span>
+            </div>
+            <span id="selected-file-state" class="file-state">已选择</span>
+          </div>
+
+          <div class="token-boundary">
+            <span class="boundary-icon"><span id="icon-lock" class="icon-slot"></span></span>
+            <div>
+              <span>Token</span>
+              <strong>由 NodeGet 管理面板配置</strong>
+            </div>
+            <span class="boundary-state">不会写入转换包</span>
+          </div>
+        </section>
+
+        <section class="workspace-pane output-pane" aria-labelledby="output-title" aria-live="polite">
+          <div class="pane-heading">
+            <div>
+              <p class="eyebrow">OUTPUT</p>
+              <h2 id="output-title">NodeGet 主题包</h2>
+            </div>
+            <span class="step-number" aria-hidden="true">02</span>
+          </div>
+
+          <div id="empty-state" class="state-view empty-state">
+            <span class="state-icon"><span id="icon-empty" class="icon-slot"></span></span>
+            <strong>等待主题包</strong>
+            <span>尚未选择文件</span>
+          </div>
+
+          <div id="busy-state" class="state-view busy-state" hidden>
+            <span class="state-icon active"><span id="icon-loader" class="icon-slot"></span></span>
+            <strong>正在转换</strong>
+            <span id="busy-message">正在检查主题包结构</span>
+            <div class="progress-track" aria-hidden="true"><span></span></div>
+            <button id="cancel-button" class="secondary-button" type="button">
+              <span id="icon-cancel" class="icon-slot"></span>取消
+            </button>
+          </div>
+
+          <div id="error-state" class="state-view error-state" hidden>
+            <span class="state-icon error"><span id="icon-error" class="icon-slot"></span></span>
+            <strong>转换失败</strong>
+            <span id="error-message"></span>
+            <button id="error-reset-button" class="secondary-button" type="button">
+              <span id="icon-error-reset" class="icon-slot"></span>重新选择
+            </button>
+          </div>
+
+          <div id="result-state" class="result-state" hidden>
+            <div class="result-summary">
+              <span class="result-icon"><span id="icon-success" class="icon-slot"></span></span>
+              <div>
+                <span>转换完成</span>
+                <strong id="result-name"></strong>
+              </div>
+              <span class="result-badge">可导入</span>
+            </div>
+
+            <dl class="result-metadata">
+              <div><dt>源版本</dt><dd id="result-version"></dd></div>
+              <div><dt>主题标识</dt><dd id="result-short"></dd></div>
+              <div><dt>文件数量</dt><dd id="result-files"></dd></div>
+              <div><dt>输出大小</dt><dd id="result-size"></dd></div>
+            </dl>
+
+            <div class="compat-checks" aria-label="转换内容">
+              <span><span id="icon-check-manifest" class="icon-slot"></span>NodeGet 清单</span>
+              <span><span id="icon-check-runtime" class="icon-slot"></span>兼容运行时</span>
+              <span><span id="icon-check-token" class="icon-slot"></span>空 Token 配置</span>
+            </div>
+
+            <section id="warnings-panel" class="warnings-panel" aria-labelledby="warnings-title" hidden>
+              <div class="warnings-heading">
+                <span id="icon-warning" class="icon-slot"></span>
+                <strong id="warnings-title">兼容提示</strong>
+                <span id="warning-count"></span>
+              </div>
+              <ul id="warning-list"></ul>
+            </section>
+
+            <div class="result-actions">
+              <button id="reset-button" class="icon-button bordered" type="button" aria-label="转换其他主题" title="转换其他主题">
+                <span id="icon-reset" class="icon-slot"></span>
+              </button>
+              <a id="download-button" class="primary-button" href="#" download>
+                <span id="icon-download" class="icon-slot"></span>下载 NodeGet ZIP
+              </a>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="app-footer">
+        <span>MIT · Open source</span>
+        <a id="background-attribution" href="https://blog.yeqing.net/acg-api/" target="_blank" rel="noreferrer" hidden>背景来源：夜轻 ACG API</a>
+      </footer>
+    </div>
+
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>
