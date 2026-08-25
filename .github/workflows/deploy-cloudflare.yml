@@ -39,4 +39,4 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           packageManager: bun
-          command: deploy
+          command: deploy --var ACG_BACKGROUND_ENABLED:${{ vars.ACG_BACKGROUND_ENABLED || 'false' }}

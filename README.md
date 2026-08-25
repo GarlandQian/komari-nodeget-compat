@@ -66,17 +66,21 @@ bun run deploy
 - `CLOUDFLARE_API_TOKEN`：可编辑目标 Worker 的 Cloudflare API Token。
 - `CLOUDFLARE_ACCOUNT_ID`：目标 Cloudflare Account ID。
 
+可选功能使用 GitHub Actions repository variables 配置：
+
+- `ACG_BACKGROUND_ENABLED`：设为 `true` 时启用 ACG 背景；未配置或其他值均按 `false` 部署。
+
 Pull Request 和非 `main` 分支由 `CI` workflow 执行类型检查、测试、构建及 Wrangler dry run，不部署。
 
 ### ACG 背景开关
 
-开源默认值为关闭，前端不会请求第三方图片。在 Cloudflare Worker 的 Settings -> Variables and Secrets 中增加普通文本变量即可开启：
+开源默认值为关闭，前端不会请求第三方图片。需要开启时，在 GitHub 仓库的 `Settings -> Secrets and variables -> Actions -> Variables` 中增加：
 
 ```text
 ACG_BACKGROUND_ENABLED=true
 ```
 
-设置后重新打开页面，桌面使用横图接口，手机使用竖图接口。开关只能由 Worker 环境变量控制，页面不提供临时关闭按钮。`wrangler.jsonc` 启用了 `keep_vars`，GitHub Actions 后续部署会保留控制台中的该变量。
+保存变量后重新运行部署 workflow。GitHub Actions 会在每次部署时把它同步为 Worker 环境变量；桌面使用横图接口，手机使用竖图接口。页面不提供临时关闭按钮。
 
 本地调试时可以复制 `.dev.vars.example` 为 `.dev.vars` 并修改值；`.dev.vars` 已被 Git 忽略。
 
