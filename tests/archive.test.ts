@@ -13,8 +13,8 @@ function sourceTheme(): Uint8Array {
     })),
     'preview.png': new Uint8Array([1, 2, 3]),
     'dist/assets/': new Uint8Array(),
-    'dist/index.html': strToU8('<!doctype html><html><head><script type="module" src="/assets/app.js"></script></head><body><div id="app"></div></body></html>'),
-    'dist/assets/app.js': strToU8('fetch("/api/public")'),
+    'dist/index.html': strToU8('<!doctype html><html><head><title>Komari Monitor</title><link rel="icon" href="/favicon.ico"><script type="module" src="/assets/app.js"></script></head><body><div id="app"></div></body></html>'),
+    'dist/assets/app.js': strToU8('const brand="Komari Monitor",technical=KomariRpc;fetch("/api/public")'),
   })
 }
 
@@ -35,6 +35,9 @@ describe('theme archive conversion', () => {
     expect(html).toContain('./assets/app.js')
     expect(html).toContain('./custom.css')
     expect(html).toContain('./custom.js')
+    expect(html).toContain('<title>NodeGet Monitor</title>')
+    expect(html).toContain('href="./favicon.ico"')
+    expect(strFromU8(files['assets/app.js']!)).toContain('brand="NodeGet Monitor",technical=KomariRpc')
 
     const fileManifest = JSON.parse(strFromU8(files['nodeget-theme-files.json']!)) as string[]
     expect(fileManifest).toContain('nodeget-theme-files.json')
@@ -57,6 +60,10 @@ describe('theme archive conversion', () => {
 
   it('returns reusable converted entries for remote distribution', () => {
     const result = convertThemeEntries(sourceTheme(), {
+      appearance: {
+        backgroundUrl: 'https://adapter.example/api/acg-background',
+        logoUrl: 'https://adapter.example/nodeget-logo.png',
+      },
       runtime: strToU8('runtime'),
       distPage: 'https://adapter.example/themes/github/test/theme/latest',
       limits: { maxFiles: 20 },
@@ -64,7 +71,14 @@ describe('theme archive conversion', () => {
     expect(result.entries['index.html']).toBeDefined()
     expect(result.entries['nodeget-theme-files.json']).toBeDefined()
     const manifest = JSON.parse(strFromU8(result.entries['nodeget-theme.json']!)) as Record<string, unknown>
+    const config = JSON.parse(strFromU8(result.entries['config.json']!)) as { user_preferences: Record<string, unknown> }
     expect(manifest.dist_page).toBe('https://adapter.example/themes/github/test/theme/latest')
+    expect(strFromU8(result.entries['index.html']!)).toContain('https://adapter.example/nodeget-logo.png')
+    expect(config.user_preferences).toMatchObject({
+      backgroundEnabled: true,
+      lightBackgroundUrl: 'https://adapter.example/api/acg-background',
+      darkBackgroundUrl: 'https://adapter.example/api/acg-background',
+    })
     expect(result.outputFileCount).toBe(Object.keys(result.entries).length)
   })
 })

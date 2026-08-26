@@ -1,4 +1,6 @@
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
+import type { ThemeAppearance } from './appearance'
+import { isThemeTextAsset, rewriteThemeAppearanceText } from './appearance'
 import { injectCompatibilityRuntime } from './html'
 import { convertManifests, parseKomariManifest, previewOutputName } from './manifest'
 
@@ -13,6 +15,7 @@ export interface ArchiveLimits {
 }
 
 export interface ConvertArchiveOptions {
+  appearance?: ThemeAppearance
   runtime: Uint8Array
   distPage?: string
   limits?: Partial<ArchiveLimits>
@@ -147,6 +150,7 @@ export function convertThemeEntries(
 
   const manifest = parseKomariManifest(strFromU8(manifestBytes))
   const converted = convertManifests(manifest, {
+    ...(options.appearance ? { appearance: options.appearance } : {}),
     ...(options.distPage ? { distPage: options.distPage } : {}),
   })
   const output = Object.create(null) as Record<string, Uint8Array>
@@ -155,14 +159,18 @@ export function convertThemeEntries(
     if (path.startsWith('dist/')) {
       const outputPath = path.slice('dist/'.length)
       if (outputPath)
-        output[outputPath] = content
+        output[outputPath] = isThemeTextAsset(outputPath)
+          ? strToU8(rewriteThemeAppearanceText(strFromU8(content), options.appearance))
+          : content
       continue
     }
     if (path !== 'komari-theme.json')
-      output[path] = content
+      output[path] = isThemeTextAsset(path)
+        ? strToU8(rewriteThemeAppearanceText(strFromU8(content), options.appearance))
+        : content
   }
 
-  output['index.html'] = strToU8(injectCompatibilityRuntime(strFromU8(indexBytes), manifest.short))
+  output['index.html'] = strToU8(injectCompatibilityRuntime(strFromU8(output['index.html']!), manifest.short))
   output['komari-nodeget-runtime.js'] = options.runtime
   output['nodeget-theme.json'] = prettyJson(converted.nodeget)
   output['komari-compat.json'] = prettyJson(converted.compat)

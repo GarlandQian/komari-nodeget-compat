@@ -10,6 +10,7 @@
 - 生成 `nodeget-theme.json`、`nodeget-theme-files.json`、`config.json` 和 NodeGet 安装 ZIP。
 - 注入公共 HTTP、RPC2 与实时状态兼容运行时，无需主题源码。
 - 转换 Komari managed 主题设置为 NodeGet `user_preferences_form`。
+- 将主题页面中独立出现的可见 `Komari` 品牌文字转换为 `NodeGet`，保留兼容协议、API 和代码标识中的技术名称。
 - 将 GitHub 最新 Release 映射为稳定的 NodeGet 主题站点 URL，并使用 R2 缓存。
 - 支持多个 NodeGet 站点，并为跨站点节点生成无冲突 ID。
 - 拒绝管理员、登录、终端及写操作，不把它们透传到 NodeGet。
@@ -75,7 +76,7 @@ bunx wrangler r2 bucket create komari-nodeget-theme-cache
 bun run deploy
 ```
 
-项目使用 Workers Static Assets 和私有 R2 绑定。部署目录为 `dist/web`；`/api/config` 只返回公开功能开关和仓库白名单，`/api/health` 返回运行状态。远程路由只允许读取配置白名单中的公开 GitHub Release，不存在任意 URL 或 NodeGet 代理接口。
+项目使用 Workers Static Assets 和私有 R2 绑定。部署目录为 `dist/web`；`/api/config` 只返回公开功能开关和仓库白名单，`/api/health` 返回运行状态。远程路由只允许读取配置白名单中的公开 GitHub Release；ACG 接口只访问代码中固定的夜轻 API 域名，不存在任意 URL 或 NodeGet 代理接口。
 
 ### GitHub Actions
 
@@ -120,13 +121,31 @@ ACG_BACKGROUND_ENABLED=true
 
 本地调试时可以复制 `.dev.vars.example` 为 `.dev.vars` 并修改值；`.dev.vars` 已被 Git 忽略。
 
-背景来自 [夜轻随机二次元图片 API](https://blog.yeqing.net/acg-api/)，只远程引用，不进入仓库或转换产物。该服务不保证 SLA，图片来源与版权状态由上游维护；转换器始终保留纯色回退。
+背景来自 [夜轻随机二次元图片 API](https://blog.yeqing.net/acg-api/)。开启后，Worker 通过固定的 `/api/acg-background` 接口代理图片，并把该地址写入新转换主题的 `backgroundEnabled`、`lightBackgroundUrl` 和 `darkBackgroundUrl` 默认值；关闭时不会请求上游。图片本身不进入仓库、R2 或转换产物，该服务不保证 SLA，转换器始终保留纯色回退。
+
+已经安装的主题不会因环境变量变化而被静默改写。开启后请从远程更新并选择覆盖 `config.json`，或在 NodeGet 主题设置中手动启用背景并填写：
+
+```text
+https://<WORKER_DOMAIN>/api/acg-background
+```
+
+### NodeGet 品牌与网站 Logo
+
+转换器会把页面中独立出现的可见 `Komari` 文案改为 `NodeGet`，但不会改动 `KomariRpc`、`komari-theme.json`、API 路径等兼容层技术标识。
+
+Worker 网站和转换后的主题共用以下仓库文件：
+
+```text
+src/web/nodeget-logo.png
+```
+
+要替换网站 Logo，可直接在 GitHub 网页中上传同名 PNG 覆盖该文件并提交到 `main`。推荐使用透明背景的正方形 PNG；部署 workflow 完成后，Worker 首页与引用该 Worker 的主题会使用新 Logo，不需要把图片地址放入 Secrets 或 Variables。
 
 ## 安全边界
 
 - 浏览器转换上限为 64 MB，核心转换器上限为 100 MB 输入、250 MB 解压内容和 10,000 个文件。
 - 远程分发上限为 32 MB ZIP、72 MB 转换内容和 5,000 个文件；首次转换的 CPU 消耗可能超过 Workers Free 的 10 ms 限制，大型主题可能需要 Workers Paid。
-- 远程下载只接受白名单内的 GitHub Release ZIP，R2 桶保持私有，不提供任意 URL 代理。
+- 远程下载只接受白名单内的 GitHub Release ZIP，R2 桶保持私有；ACG 图片代理只接受固定上游域名，不提供任意 URL 代理。
 - ZIP 路径遍历、重复路径、缺失主题清单与缺失入口会被拒绝。
 - 转换后的运行时只实现公共监控读取能力。
 - 真实 Token、`.dev.vars`、`.env`、构建产物和 Wrangler 本地状态不会进入 Git。

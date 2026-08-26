@@ -22,7 +22,7 @@ Worker 返回的是轻量安装清单。NodeGet 只下载入口 HTML、兼容运
 https://<WORKER_DOMAIN>/themes/github/<OWNER>/<REPOSITORY>/releases/<ASSET_ID>/v1/...
 ```
 
-这个固定地址由 Worker 自动生成，不需要手动导入 NodeGet。它避免 NodeGet 串行拉取几百个主题文件，也保证旧安装不会在 `latest` 指向新 Release 后丢失旧资源。末尾的 `v1` 是资源改写协议版本；未来改变改写规则时应增加新版本并继续保留旧版本，不能就地改变 `immutable` URL 的内容语义。
+这个固定地址由 Worker 自动生成，不需要手动导入 NodeGet。它避免 NodeGet 串行拉取几百个主题文件，也保证安装不会在 `latest` 指向新 Release 后丢失当前资源。末尾的 `v1` 是首版资源改写协议，包含 NodeGet 可见品牌、仓库 Logo 与固定 Release 资源引用。
 
 ## Release 选择
 
@@ -44,6 +44,8 @@ Worker 调用 GitHub `releases/latest` 获取最新正式 Release。GitHub 自�
 3. 转换主题，将文件合并成一个连续 R2 数据包和一个索引。
 4. 为 NodeGet 生成少量本地安装文件，并把源主题静态资源改写到固定 Release 地址。
 5. 按文件偏移使用 R2 Range 响应 NodeGet 和浏览器请求。
+
+`latest/config.json` 会按当前部署环境动态加入可选 ACG 背景默认值；主题 Logo 指向同一 Worker 的 `/nodeget-logo.png`。因此修改开关后需要重新远程更新配置，而替换 Logo 文件只需重新部署 Worker。
 
 最新 Release 默认每 300 秒重新检查一次，可用 `RELEASE_CHECK_TTL_SECONDS` 调整到 60 至 86400 秒。GitHub 临时不可用时，如果 R2 已有缓存，会继续提供上一次成功版本。
 
