@@ -8,11 +8,16 @@ interface CallRecord {
   params: Record<string, unknown>
 }
 
+const GIBIBYTE_BYTES = 1024 ** 3
+
 class FixtureCaller implements NodeGetCaller {
   calls: CallRecord[] = []
   closed = false
 
-  constructor(private readonly legacyUuidList = false) {}
+  constructor(
+    private readonly legacyUuidList = false,
+    private readonly metadata: Record<string, unknown> = {},
+  ) {}
 
   async call<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     this.calls.push({ method, params })
@@ -36,6 +41,7 @@ class FixtureCaller implements NodeGetCaller {
         { namespace: TEST_UUID, key: 'metadata_name', value: JSON.stringify('Fixture Node') },
         { namespace: TEST_UUID, key: 'metadata_country', value: JSON.stringify('US') },
         { namespace: TEST_UUID, key: 'metadata_asn', value: JSON.stringify('AS64500') },
+        ...Object.entries(this.metadata).map(([key, value]) => ({ namespace: TEST_UUID, key, value })),
       ] as T
     }
     if (method === 'agent_dynamic_summary_multi_last_query') {
@@ -109,6 +115,54 @@ describe('NodeGetSource', () => {
     const source = new NodeGetSource('Legacy', 'wss://legacy.example/nodeget/rpc', caller)
     await source.getClients()
     expect(caller.calls.map(call => call.method)).toContain('nodeget-server_list_all_agent_uuid')
+  })
+
+  it('converts a configured NodeGet traffic extension quota from GB to bytes', async () => {
+    const caller = new FixtureCaller(false, {
+      metadata_billing_mode: 'quota',
+      metadata_traffic_limit: 1_000,
+      metadata_traffic_limit_type: 'max',
+      metadata_traffic_period: 'monthly',
+    })
+    const source = new NodeGetSource('Fixture', 'wss://nodeget.example/nodeget/rpc', caller)
+    const clients = await source.getClients()
+
+    expect(clients[TEST_UUID]?.traffic_limit).toBe(1_000 * GIBIBYTE_BYTES)
+    expect(clients[TEST_UUID]?.traffic_limit_type).toBe('sum')
+    const metadataCall = caller.calls.find(call => call.method === 'kv_get_multi_value')
+    expect(metadataCall?.params.namespace_key).toContainEqual({
+      namespace: TEST_UUID,
+      key: 'metadata_billing_mode',
+    })
+    expect(metadataCall?.params.namespace_key).toContainEqual({
+      namespace: TEST_UUID,
+      key: 'metadata_traffic_period',
+    })
+  })
+
+  it('keeps standalone traffic metadata in bytes without the extension signature', async () => {
+    const caller = new FixtureCaller(false, {
+      metadata_traffic_limit: 5_000_000_000,
+      metadata_traffic_limit_type: 'max',
+    })
+    const source = new NodeGetSource('Fixture', 'wss://nodeget.example/nodeget/rpc', caller)
+    const clients = await source.getClients()
+
+    expect(clients[TEST_UUID]?.traffic_limit).toBe(5_000_000_000)
+    expect(clients[TEST_UUID]?.traffic_limit_type).toBe('max')
+  })
+
+  it('does not expose pay-as-you-go extension metadata as a Komari quota', async () => {
+    const caller = new FixtureCaller(false, {
+      metadata_billing_mode: 'payg',
+      metadata_traffic_limit: 500,
+      metadata_traffic_period: 'never',
+    })
+    const source = new NodeGetSource('Fixture', 'wss://nodeget.example/nodeget/rpc', caller)
+    const clients = await source.getClients()
+
+    expect(clients[TEST_UUID]?.traffic_limit).toBe(0)
+    expect(clients[TEST_UUID]?.traffic_limit_type).toBe('sum')
   })
 
   it('keeps Ping and TCPing tasks distinct and records failed probes as loss', async () => {

@@ -189,6 +189,20 @@ describe('remote NodeGet theme distribution', () => {
     expect(fileList).not.toContain('assets/app.js')
     expect(fileList).not.toContain('images/logo.png')
 
+    env.ASSETS = {
+      fetch: async request => new URL(request.url).pathname === '/komari-nodeget-runtime.js'
+        ? new Response('globalThis.compat="current-deployment";')
+        : new Response('not found', { status: 404 }),
+    }
+    const runtimeResponse = await handleRemoteTheme(
+      new Request(`${base}/komari-nodeget-runtime.js`),
+      env,
+      { fetcher, now: () => 1_000_125 },
+    )
+    expect(await runtimeResponse!.text()).toBe('globalThis.compat="current-deployment";')
+    expect(runtimeResponse?.headers.get('cache-control')).toBe('no-store')
+    expect(runtimeResponse?.headers.get('etag')).toBeNull()
+
     const indexResponse = await handleRemoteTheme(
       new Request(`${base}/index.html`),
       env,

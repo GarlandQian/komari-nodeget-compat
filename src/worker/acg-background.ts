@@ -84,7 +84,7 @@ export async function handleAcgBackground(
       cache: 'no-store',
       headers: {
         accept: 'application/json',
-        'user-agent': 'komari-nodeget-theme-adapter/0.3',
+        'user-agent': 'komari-nodeget-theme-adapter/0.3.1',
       },
       redirect: 'manual',
       signal: request.signal,

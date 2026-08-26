@@ -13,6 +13,7 @@
 - 将主题页面中独立出现的可见 `Komari` 品牌文字转换为 `NodeGet`，保留兼容协议、API 和代码标识中的技术名称。
 - 将 GitHub 最新 Release 映射为稳定的 NodeGet 主题站点 URL，并使用 R2 缓存。
 - 支持多个 NodeGet 站点，并为跨站点节点生成无冲突 ID。
+- 自动识别 NodeGet `extension-traffic` 的节点配置，仅在识别后把扩展保存的 GB 流量额度换算为 Komari 使用的字节。
 - 拒绝管理员、登录、终端及写操作，不把它们透传到 NodeGet。
 
 完整协议范围见 [docs/protocol-scope.md](docs/protocol-scope.md)。
@@ -31,6 +32,12 @@
 
 转换产物默认 Token 为空是有意的安全行为。主题能打开但没有服务器信息时，先检查上述 `Token 授权` 页面；未配置 `site_tokens` 时运行时不会连接任何 NodeGet 后端。修改后刷新主题页面即可。
 
+### NodeGet 流量扩展
+
+适配层支持 [`extension-traffic`](https://github.com/34892002/nodeget/tree/main/extension-traffic) 的流量额度配置。扩展把 `metadata_traffic_limit` 保存为 GB，而 Komari 主题把 `traffic_limit` 当作字节；适配层会按每个节点的 `metadata_billing_mode` / `metadata_traffic_period` 配置签名自动识别，并使用 `1 GB = 1024³ B` 转换。
+
+只有在扩展已为该节点保存有效配置时才会转换。仅安装扩展但未配置节点不会触发；没有扩展签名的自定义 `metadata_traffic_limit` 仍按字节处理，避免改变其他 NodeGet 元数据方案。扩展的按量计费模式没有对应的 Komari 公共主题额度字段，因此不会伪装成固定额度。
+
 NodeGet 当前会把主题配置提供给访问者浏览器，因此公开主题 Token 仍然可见，必须使用最小只读权限。参考 [docs/nodeget-minimal-token.md](docs/nodeget-minimal-token.md)。
 
 ## NodeGet 远程导入
@@ -45,7 +52,7 @@ https://<WORKER_DOMAIN>/themes/github/<OWNER>/<REPOSITORY>/latest
 
 为避免 NodeGet 串行下载数百个文件导致导入长时间无响应，远程清单只让 NodeGet 保存入口、兼容运行时、配置和预览等少量文件；原主题的 JS、CSS、图片和字体继续从 Worker 的固定 Release 地址加载。固定地址不会随 `latest` 改变，所以已安装版本不会被后续发布破坏。远程安装后的主题需要 Worker 保持可访问；需要完全独立于 Worker 时使用本地 ZIP 转换模式。
 
-上游发布新版后，在 NodeGet 主题管理中点击“从远程更新”即可获取最新版；这不是后台静默自动更新。完整说明见 [docs/remote-distribution.md](docs/remote-distribution.md)。
+上游发布新版后，在 NodeGet 主题管理中点击“从远程更新”即可获取最新版；这不是后台静默自动更新。兼容运行时会从当前 Worker 部署读取，因此即使上游主题 Release 没变，远程更新也能获得适配器修复。完整说明见 [docs/remote-distribution.md](docs/remote-distribution.md)。
 
 ## 本地开发
 
