@@ -77,8 +77,24 @@ bun run deploy
 
 推送到 `main` 或手动运行 `Deploy Cloudflare Worker` workflow 会执行完整检查并部署。需要在 GitHub 仓库的 Actions secrets 或 `production` environment 中配置：
 
-- `CLOUDFLARE_API_TOKEN`：需要 `Workers Scripts: Edit`、`Workers R2 Storage: Edit` 和 `Account Settings: Read`。
+- `CLOUDFLARE_API_TOKEN`：按下方最小权限创建的 Cloudflare API Token。
 - `CLOUDFLARE_ACCOUNT_ID`：目标 Cloudflare Account ID。
+
+#### Cloudflare API Token 最小权限
+
+在 Cloudflare 的 [API Tokens](https://dash.cloudflare.com/profile/api-tokens) 页面选择 `Create Token -> Create Custom Token`，配置以下 Account 权限：
+
+| 权限 | 级别 | 用途 |
+| --- | --- | --- |
+| `Account Settings` | `Read` | 让 Wrangler 确认目标账户 |
+| `Workers Scripts` | `Edit` | 创建和更新 Worker、Static Assets 与绑定 |
+| `Workers R2 Storage` | `Edit` | 检查并创建 `komari-nodeget-theme-cache` R2 桶 |
+
+`Account Resources` 选择 `Include -> Specific account -> 你的目标账户`。当前配置只部署到 `workers.dev`，不需要任何 Zone 权限，也不需要 KV、DNS、Pages、D1 或 API Token 管理权限。
+
+如果以后在 `wrangler.jsonc` 中增加自定义域名 `routes`，再额外添加 `Zone -> Workers Routes -> Edit`，并把 `Zone Resources` 限定到对应域名。不要使用 R2 页面生成的 S3 Access Key；GitHub Actions 需要的是上述通用 Cloudflare API Token。
+
+权限名称可对照 Cloudflare 官方的 [GitHub Actions 部署说明](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/)、[API Token 权限表](https://developers.cloudflare.com/fundamentals/api/reference/permissions/) 和 [R2 Create Bucket API](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/methods/create/)。
 
 可选功能使用 GitHub Actions repository variables 配置：
 
