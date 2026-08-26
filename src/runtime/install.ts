@@ -70,7 +70,7 @@ export function installCompatibilityRuntime(): CompatibilityRuntimeHandle {
 
   const NativeWebSocket = installWebSocketFacade(window, facadePromise)
   const handle: CompatibilityRuntimeHandle = {
-    version: '0.2.0',
+    version: '0.2.1',
     ready: facadePromise.then(() => undefined),
     close() {
       window.fetch = nativeFetch

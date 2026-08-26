@@ -59,10 +59,17 @@ export function sourceKey(name: string, backendUrl: string): string {
 
 export function normalizeWebSocketUrl(value: string): string {
   const url = new URL(value)
-  if (url.protocol !== 'ws:' && url.protocol !== 'wss:')
-    throw new Error(`NodeGet backend_url must use ws:// or wss://: ${value}`)
+  if (url.protocol === 'http:')
+    url.protocol = 'ws:'
+  else if (url.protocol === 'https:')
+    url.protocol = 'wss:'
+  else if (url.protocol !== 'ws:' && url.protocol !== 'wss:')
+    throw new Error(`NodeGet backend_url must use http(s):// or ws(s)://: ${value}`)
+  if (url.pathname === '/' || !url.pathname)
+    url.pathname = '/nodeget/rpc'
   url.username = ''
   url.password = ''
+  url.hash = ''
   return url.toString()
 }
 

@@ -41,4 +41,34 @@ describe('NodeGetRpcClient', () => {
     expect(socket.sent[0].params.token).toBe('read-only-token')
     client.close()
   })
+
+  it('normalizes a NodeGet panel backend origin to its WebSocket RPC endpoint', async () => {
+    const socket = new FakeSocket()
+    let connectedUrl = ''
+    const client = new NodeGetRpcClient(
+      { backend_url: 'https://nodeget.example', token: 'read-only-token' },
+      (url) => {
+        connectedUrl = url
+        return socket
+      },
+    )
+    expect(await client.call<string>('test_method')).toBe('ok')
+    expect(connectedUrl).toBe('wss://nodeget.example/nodeget/rpc')
+    client.close()
+  })
+
+  it('adds the default RPC path when NodeGet stores a pathless WebSocket URL', async () => {
+    const socket = new FakeSocket()
+    let connectedUrl = ''
+    const client = new NodeGetRpcClient(
+      { backend_url: 'wss://nodeget.example', token: 'read-only-token' },
+      (url) => {
+        connectedUrl = url
+        return socket
+      },
+    )
+    expect(await client.call<string>('test_method')).toBe('ok')
+    expect(connectedUrl).toBe('wss://nodeget.example/nodeget/rpc')
+    client.close()
+  })
 })

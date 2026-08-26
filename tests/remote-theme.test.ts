@@ -17,8 +17,9 @@ function sourceTheme(version = '2.0.0'): Uint8Array {
       configuration: { type: 'managed', data: [] },
     })),
     'preview.png': new Uint8Array([1, 2, 3]),
-    'dist/index.html': strToU8('<!doctype html><html><head></head><body>remote</body></html>'),
-    'dist/assets/app.js': strToU8('globalThis.remoteFixture=true'),
+    'dist/index.html': strToU8('<!doctype html><html><head><script type="module" src="/assets/app.js"></script></head><body><img src="/images/logo.png">remote</body></html>'),
+    'dist/assets/app.js': strToU8(`globalThis.remoteFixture="${version}";globalThis.logo="/images/logo.png";globalThis.preload="assets/lazy.css"`),
+    'dist/images/logo.png': new Uint8Array([4, 5, 6]),
   })
 }
 
@@ -128,7 +129,7 @@ function environment(bucket: MemoryBucket): RemoteThemeEnvironment {
 describe('remote NodeGet theme distribution', () => {
   beforeEach(() => resetRemoteThemeMemoryForTests())
 
-  it('converts the latest GitHub release once and serves files from an R2 pack', async () => {
+  it('serves a lightweight install list backed by immutable release assets', async () => {
     const source = sourceTheme()
     const bucket = new MemoryBucket()
     const { fetcher, calls } = fixtureFetch(source)
@@ -163,16 +164,58 @@ describe('remote NodeGet theme distribution', () => {
       { fetcher, now: () => 1_000_100 },
     )
     const fileList = await fileListResponse!.json() as string[]
-    expect(fileList).toContain('assets/app.js')
-    expect(fileList).toContain('komari-nodeget-runtime.js')
+    expect(fileList).toEqual([
+      'nodeget-theme.json',
+      'nodeget-theme-files.json',
+      'index.html',
+      'komari-nodeget-runtime.js',
+      'komari-compat.json',
+      'config.json',
+      'custom.css',
+      'custom.js',
+      'preview.png',
+    ])
+    expect(fileList).not.toContain('assets/app.js')
+    expect(fileList).not.toContain('images/logo.png')
+
+    const indexResponse = await handleRemoteTheme(
+      new Request(`${base}/index.html`),
+      env,
+      { fetcher, now: () => 1_000_150 },
+    )
+    const html = await indexResponse!.text()
+    const pinnedBase = 'https://adapter.example/themes/github/test-owner/test-theme/releases/30/v1'
+    expect(html).toContain(`${pinnedBase}/assets/app.js`)
+    expect(html).toContain(`${pinnedBase}/images/logo.png`)
+    expect(html).toContain('./komari-nodeget-runtime.js')
+    expect(html).toContain('./custom.css')
+    expect(html).toContain('./custom.js')
 
     const assetResponse = await handleRemoteTheme(
-      new Request(`${base}/assets/app.js`),
+      new Request(`${pinnedBase}/assets/app.js`),
       env,
       { fetcher, now: () => 1_000_200 },
     )
-    expect(await assetResponse!.text()).toBe('globalThis.remoteFixture=true')
+    expect(await assetResponse!.text()).toBe(`globalThis.remoteFixture="2.0.0";globalThis.logo="${pinnedBase}/images/logo.png";globalThis.preload="${pinnedBase}/assets/lazy.css"`)
     expect(assetResponse?.headers.get('content-type')).toContain('text/javascript')
+    expect(assetResponse?.headers.get('cache-control')).toBe('public, max-age=31536000, immutable')
+    const cachedAssetResponse = await handleRemoteTheme(
+      new Request(`${pinnedBase}/assets/app.js`, {
+        headers: { 'if-none-match': assetResponse!.headers.get('etag')! },
+      }),
+      env,
+      { fetcher, now: () => 1_000_225 },
+    )
+    expect(cachedAssetResponse?.status).toBe(304)
+    expect(cachedAssetResponse?.headers.get('content-length')).toBeNull()
+
+    const imageResponse = await handleRemoteTheme(
+      new Request(`${pinnedBase}/images/logo.png`),
+      env,
+      { fetcher, now: () => 1_000_250 },
+    )
+    expect(new Uint8Array(await imageResponse!.arrayBuffer())).toEqual(new Uint8Array([4, 5, 6]))
+    expect(imageResponse?.headers.get('cache-control')).toBe('public, max-age=31536000, immutable')
     expect(calls).toEqual({ api: 1, asset: 1 })
     expect(bucket.puts).toBe(3)
     expect([...bucket.objects.keys()].some(key => key.endsWith('/theme.pack'))).toBe(true)
@@ -202,6 +245,19 @@ describe('remote NodeGet theme distribution', () => {
     )
     expect(response?.status).toBe(403)
     expect(await response!.json()).toMatchObject({ code: 'repository_not_allowed' })
+    expect(calls).toEqual({ api: 0, asset: 0 })
+  })
+
+  it('does not fetch GitHub for an uncached immutable release address', async () => {
+    const bucket = new MemoryBucket()
+    const { fetcher, calls } = fixtureFetch(sourceTheme())
+    const response = await handleRemoteTheme(
+      new Request('https://adapter.example/themes/github/test-owner/test-theme/releases/999/v1/assets/app.js'),
+      environment(bucket),
+      { fetcher, now: () => 1_000_000 },
+    )
+    expect(response?.status).toBe(404)
+    expect(await response!.json()).toMatchObject({ code: 'release_not_cached' })
     expect(calls).toEqual({ api: 0, asset: 0 })
   })
 
@@ -268,6 +324,12 @@ describe('remote NodeGet theme distribution', () => {
       { fetcher, now: () => 1_000_000 },
     )
     expect((await first!.json() as Record<string, unknown>).version).toBe('2.0.0')
+    const firstIndex = await handleRemoteTheme(
+      new Request(`${base}/index.html`),
+      environment(bucket),
+      { fetcher, now: () => 1_000_100 },
+    )
+    expect(await firstIndex!.text()).toContain('/releases/30/v1/assets/app.js')
 
     releaseIndex = 1
     const updated = await handleRemoteTheme(
@@ -279,6 +341,20 @@ describe('remote NodeGet theme distribution', () => {
     expect(updatedManifest.version).toBe('2.1.0')
     expect(updatedManifest.dist_page).toBe(base)
     expect(updated?.headers.get('x-komari-release')).toBe('v2.1.0')
+
+    const updatedIndex = await handleRemoteTheme(
+      new Request(`${base}/index.html`),
+      environment(bucket),
+      { fetcher, now: () => 1_301_100 },
+    )
+    expect(await updatedIndex!.text()).toContain('/releases/31/v1/assets/app.js')
+
+    const oldAsset = await handleRemoteTheme(
+      new Request('https://adapter.example/themes/github/test-owner/test-theme/releases/30/v1/assets/app.js'),
+      environment(bucket),
+      { fetcher, now: () => 1_301_200 },
+    )
+    expect(await oldAsset!.text()).toContain('remoteFixture="2.0.0"')
     expect(calls).toEqual({ api: 2, asset: 2 })
   })
 })
