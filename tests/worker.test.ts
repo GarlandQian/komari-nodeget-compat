@@ -17,6 +17,7 @@ describe('Cloudflare worker', () => {
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({
       acg_background_enabled: false,
+      nodeget_dashboard_url: 'https://dash.nodeget.com',
       remote_theme_enabled: false,
       remote_theme_repositories: [],
     })
@@ -28,10 +29,29 @@ describe('Cloudflare worker', () => {
       const response = await worker.fetch(new Request('https://adapter.example/api/config'), environment(value))
       expect(await response.json()).toEqual({
         acg_background_enabled: true,
+        nodeget_dashboard_url: 'https://dash.nodeget.com',
         remote_theme_enabled: false,
         remote_theme_repositories: [],
       })
     }
+  })
+
+  it('publishes a validated custom NodeGet dashboard URL and falls back to the official dashboard', async () => {
+    const custom = await worker.fetch(new Request('https://adapter.example/api/config'), {
+      ...environment(),
+      NODEGET_DASHBOARD_URL: 'https://nodeget.example/panel/?ignored=true#old',
+    })
+    expect(await custom.json()).toMatchObject({
+      nodeget_dashboard_url: 'https://nodeget.example/panel',
+    })
+
+    const invalid = await worker.fetch(new Request('https://adapter.example/api/config'), {
+      ...environment(),
+      NODEGET_DASHBOARD_URL: 'javascript:alert(1)',
+    })
+    expect(await invalid.json()).toMatchObject({
+      nodeget_dashboard_url: 'https://dash.nodeget.com',
+    })
   })
 
   it('does not expose an open API proxy', async () => {

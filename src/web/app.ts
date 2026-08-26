@@ -26,6 +26,7 @@ const MAX_BROWSER_INPUT_BYTES = 64 * 1024 * 1024
 const CONVERSION_TIMEOUT_MS = 120_000
 const BACKGROUND_REFRESH_COOLDOWN_MS = 3_000
 const THEME_KEY = 'komari-nodeget-color-theme'
+const DEFAULT_NODEGET_DASHBOARD_URL = 'https://dash.nodeget.com'
 
 interface ConvertSuccess {
   id: number
@@ -51,6 +52,7 @@ type ViewState = 'empty' | 'busy' | 'error' | 'result'
 
 interface PublicConfig {
   acg_background_enabled?: boolean
+  nodeget_dashboard_url?: string
   remote_theme_enabled?: boolean
   remote_theme_repositories?: string[]
 }
@@ -123,6 +125,7 @@ let conversionId = 0
 let dragDepth = 0
 let lastBackgroundRefresh = 0
 let backgroundAvailable = false
+let nodeGetDashboardUrl = DEFAULT_NODEGET_DASHBOARD_URL
 let publicFeaturesReady: Promise<void> = Promise.resolve()
 
 function setView(state: ViewState): void {
@@ -331,6 +334,21 @@ function validRepository(value: string): boolean {
     && /^[A-Za-z0-9_.-]+$/.test(repo ?? '')
 }
 
+function normalizedNodeGetDashboardUrl(value: string | undefined): string {
+  try {
+    const url = new URL(value?.trim() || DEFAULT_NODEGET_DASHBOARD_URL)
+    if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password)
+      return DEFAULT_NODEGET_DASHBOARD_URL
+    url.hash = ''
+    url.search = ''
+    const pathname = url.pathname.replace(/\/+$/, '')
+    return `${url.origin}${pathname === '/' ? '' : pathname}`
+  }
+  catch {
+    return DEFAULT_NODEGET_DASHBOARD_URL
+  }
+}
+
 function updateRemoteUrl(): void {
   const repository = remoteRepository.value
   if (!validRepository(repository)) {
@@ -341,10 +359,11 @@ function updateRemoteUrl(): void {
   const [owner, repo] = repository.split('/') as [string, string]
   const themeUrl = new URL(`/themes/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/latest`, location.origin).href
   remoteThemeUrl.value = themeUrl
-  nodeGetImportLink.href = `https://dash.nodeget.com/#/dashboard/theme-management?add=${encodeURIComponent(themeUrl)}`
+  nodeGetImportLink.href = `${nodeGetDashboardUrl}/#/dashboard/theme-management?add=${encodeURIComponent(themeUrl)}`
 }
 
 function initializeRemoteDistribution(config: PublicConfig): void {
+  nodeGetDashboardUrl = normalizedNodeGetDashboardUrl(config.nodeget_dashboard_url)
   const repositories = config.remote_theme_enabled
     ? (config.remote_theme_repositories ?? []).filter(validRepository)
     : []

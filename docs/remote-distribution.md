@@ -26,7 +26,7 @@ https://<WORKER_DOMAIN>/themes/github/<OWNER>/<REPOSITORY>/releases/<ASSET_ID>/v
 
 ## Release 选择
 
-Worker 调用 GitHub `releases/latest` 获取最新正式 Release。GitHub 自动生成的 Source code ZIP 不属于 Release assets，不会被选中。
+Worker 调用 GitHub `releases/latest` 获取最新正式 Release。公共 GitHub API 返回限流或临时服务错误时，会回退读取该仓库的公开 Latest Release 跳转和附件列表；公开主题不需要 GitHub Token。GitHub 自动生成的 Source code ZIP 不属于 Release assets，不会被选中。
 
 - 只有一个上传的 ZIP 时直接使用。
 - 多个 ZIP 时优先包含 `komari`、`theme` 和 `build` 的资源。
@@ -59,7 +59,16 @@ R2 桶名固定为 `komari-nodeget-theme-cache`，由 GitHub Actions 自动创�
 ALLOWED_GITHUB_REPOSITORIES=owner/theme-one,owner/theme-two
 ```
 
-使用逗号分隔，不要加入空格。白名单为空时远程分发关闭。代码支持显式 `*`，但公开部署不应使用，否则任何人都能触发下载、CPU 和 R2 存储消耗。
+使用逗号分隔，不要加入空格。白名单为空时远程分发关闭。
+代码支持显式 `*`，但公开部署不应使用，否则任何人都能触发下载、CPU 和 R2 存储消耗。
+
+“在 NodeGet 导入”按钮默认使用官方面板，也可以在同一位置配置自己的面板根地址：
+
+```text
+NODEGET_DASHBOARD_URL=https://dash.nodeget.com
+```
+
+该值随 GitHub Actions 部署为 Worker 环境变量，并通过 `/api/config` 提供给转换器页面。只接受不含账号密码的 HTTP(S) URL；无效值会回退官方地址。
 
 ## 更新行为
 

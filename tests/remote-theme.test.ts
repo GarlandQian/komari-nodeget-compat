@@ -267,14 +267,64 @@ describe('remote NodeGet theme distribution', () => {
     const bucket = new MemoryBucket()
     const { fetcher, calls } = fixtureFetch(sourceTheme())
     const base = 'https://adapter.example/themes/github/test-owner/test-theme/latest'
-    const response = await handleRemoteTheme(new Request(base), environment(bucket), { fetcher })
+    const env = environment(bucket)
+    env.NODEGET_DASHBOARD_URL = 'https://nodeget.example/custom/'
+    const response = await handleRemoteTheme(new Request(base), env, { fetcher })
     expect(response?.status).toBe(200)
     expect(await response!.json()).toMatchObject({
       theme_url: base,
+      nodeget_import_url: `https://nodeget.example/custom/#/dashboard/theme-management?add=${encodeURIComponent(base)}`,
       update_mode: 'manual-remote-update',
     })
     expect(calls).toEqual({ api: 0, asset: 0 })
     expect(bucket.puts).toBe(0)
+  })
+
+  it('falls back to public GitHub release pages when the API is rate limited', async () => {
+    const source = sourceTheme('2.2.0')
+    const bucket = new MemoryBucket()
+    const calls: string[] = []
+    const fetcher = (async (input: string | URL | Request) => {
+      const url = new URL(input instanceof Request ? input.url : input)
+      calls.push(`${url.hostname}${url.pathname}`)
+      if (url.hostname === 'api.github.com')
+        return Response.json({ message: 'API rate limit exceeded' }, { status: 403 })
+      if (url.pathname.endsWith('/releases/latest')) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'https://github.com/test-owner/test-theme/releases/tag/v2.2.0' },
+        })
+      }
+      if (url.pathname.endsWith('/releases/expanded_assets/v2.2.0')) {
+        return new Response(`
+          <ul><li>
+            <a href="/test-owner/test-theme/releases/download/v2.2.0/komari-theme-build-v2.2.0.zip">theme</a>
+            <span>${Math.ceil(source.byteLength / 1024)} KB</span>
+            <relative-time datetime="2026-08-26T07:00:00Z"></relative-time>
+          </li></ul>
+        `, { headers: { 'content-type': 'text/html; charset=utf-8' } })
+      }
+      if (url.pathname.endsWith('/releases/download/v2.2.0/komari-theme-build-v2.2.0.zip')) {
+        return new Response(source.slice(), {
+          headers: { 'content-length': String(source.byteLength), 'content-type': 'application/zip' },
+        })
+      }
+      return new Response('not found', { status: 404 })
+    }) as typeof fetch
+
+    const response = await handleRemoteTheme(
+      new Request('https://adapter.example/themes/github/test-owner/test-theme/latest/nodeget-theme.json'),
+      environment(bucket),
+      { fetcher, now: () => 1_000_000 },
+    )
+    expect(response?.status).toBe(200)
+    expect((await response!.json() as Record<string, unknown>).version).toBe('2.2.0')
+    expect(calls).toEqual([
+      'api.github.com/repos/test-owner/test-theme/releases/latest',
+      'github.com/test-owner/test-theme/releases/latest',
+      'github.com/test-owner/test-theme/releases/expanded_assets/v2.2.0',
+      'github.com/test-owner/test-theme/releases/download/v2.2.0/komari-theme-build-v2.2.0.zip',
+    ])
   })
 
   it('rejects disallowed repositories before fetching GitHub', async () => {

@@ -1,4 +1,6 @@
 import type { ConversionMetadata } from '../converter/archive'
+import type { DefaultTreeAdapterMap } from 'parse5'
+import { parseFragment } from 'parse5'
 import { convertThemeEntries } from '../converter/archive'
 import type { ThemeAppearance } from '../converter/appearance'
 import {
@@ -16,6 +18,8 @@ export const REMOTE_THEME_FILE_LIMIT = 5_000
 const DEFAULT_RELEASE_CHECK_TTL_SECONDS = 300
 const MIN_RELEASE_CHECK_TTL_SECONDS = 60
 const MAX_RELEASE_CHECK_TTL_SECONDS = 86_400
+const DEFAULT_NODEGET_DASHBOARD_URL = 'https://dash.nodeget.com'
+const GITHUB_RELEASE_PAGE_LIMIT = 1024 * 1024
 const ROUTE_PREFIX = '/themes/github/'
 const REMOTE_ASSET_VERSION = 'v1'
 const REMOTE_INSTALL_FILES = [
@@ -73,6 +77,26 @@ export interface RemoteThemeEnvironment {
   ALLOWED_GITHUB_REPOSITORIES?: string
   RELEASE_CHECK_TTL_SECONDS?: string
   GITHUB_API_TOKEN?: string
+  NODEGET_DASHBOARD_URL?: string
+}
+
+export function nodeGetDashboardUrl(value: string | undefined): string {
+  try {
+    const url = new URL(value?.trim() || DEFAULT_NODEGET_DASHBOARD_URL)
+    if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password)
+      return DEFAULT_NODEGET_DASHBOARD_URL
+    url.hash = ''
+    url.search = ''
+    const pathname = url.pathname.replace(/\/+$/, '')
+    return `${url.origin}${pathname === '/' ? '' : pathname}`
+  }
+  catch {
+    return DEFAULT_NODEGET_DASHBOARD_URL
+  }
+}
+
+function nodeGetImportUrl(themeUrl: string, configuredDashboard: string | undefined): string {
+  return `${nodeGetDashboardUrl(configuredDashboard)}/#/dashboard/theme-management?add=${encodeURIComponent(themeUrl)}`
 }
 
 function themeAppearance(request: Request, env: RemoteThemeEnvironment): ThemeAppearance {
@@ -115,6 +139,46 @@ interface GitHubRelease {
   tag_name: string
   published_at: string
   assets: GitHubAsset[]
+}
+
+type HtmlNode = DefaultTreeAdapterMap['node']
+type HtmlElement = DefaultTreeAdapterMap['element']
+type HtmlParentNode = DefaultTreeAdapterMap['parentNode']
+
+function isHtmlElement(node: HtmlNode): node is HtmlElement {
+  return 'tagName' in node && 'attrs' in node
+}
+
+function isHtmlParent(node: HtmlNode): node is HtmlParentNode {
+  return 'childNodes' in node
+}
+
+function htmlAttribute(element: HtmlElement, name: string): string | undefined {
+  return element.attrs.find(attribute => attribute.name === name)?.value
+}
+
+function htmlText(node: HtmlNode): string {
+  if ('value' in node && typeof node.value === 'string')
+    return node.value
+  if (!isHtmlParent(node))
+    return ''
+  return node.childNodes.map(htmlText).join(' ')
+}
+
+function descendantAttribute(node: HtmlNode, tagName: string, attributeName: string): string | undefined {
+  if (isHtmlElement(node) && node.tagName === tagName) {
+    const value = htmlAttribute(node, attributeName)
+    if (value)
+      return value
+  }
+  if (!isHtmlParent(node))
+    return undefined
+  for (const child of node.childNodes) {
+    const value = descendantAttribute(child, tagName, attributeName)
+    if (value)
+      return value
+  }
+  return undefined
 }
 
 interface BundleAlias {
@@ -408,6 +472,162 @@ function selectReleaseAsset(release: GitHubRelease): GitHubAsset {
   return scored[0]!.asset
 }
 
+function stableNumericId(value: string): number {
+  let high = 0x811c9dc5
+  let low = 0x9e3779b9
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    high = Math.imul(high ^ code, 0x01000193) >>> 0
+    low = Math.imul(low ^ (code + index), 0x85ebca6b) >>> 0
+  }
+  return ((high & 0x1fffff) * 0x1_0000_0000 + low) || 1
+}
+
+function displayedAssetSize(text: string): number {
+  const match = text.match(/\b(\d+(?:\.\d+)?)\s*(bytes?|kib|mib|gib|kb|mb|gb)\b/i)
+  if (!match)
+    return 1
+  const value = Number.parseFloat(match[1]!)
+  const unit = match[2]!.toLowerCase()
+  const powers: Record<string, number> = {
+    byte: 1,
+    bytes: 1,
+    kb: 1024,
+    kib: 1024,
+    mb: 1024 ** 2,
+    mib: 1024 ** 2,
+    gb: 1024 ** 3,
+    gib: 1024 ** 3,
+  }
+  const size = Math.ceil(value * (powers[unit] ?? 1))
+  return Number.isSafeInteger(size) && size > 0 ? size : 1
+}
+
+function releaseAssetUrl(
+  href: string,
+  route: RemoteThemeRoute,
+  releaseTag: string,
+): { name: string, url: string } | null {
+  try {
+    const url = new URL(href, 'https://github.com')
+    if (url.protocol !== 'https:' || url.hostname !== 'github.com')
+      return null
+    const parts = url.pathname.split('/').filter(Boolean)
+    if (parts.length < 6
+      || decodeURIComponent(parts[0]!).toLowerCase() !== route.owner.toLowerCase()
+      || decodeURIComponent(parts[1]!).toLowerCase() !== route.repo.toLowerCase()
+      || parts[2] !== 'releases'
+      || parts[3] !== 'download') {
+      return null
+    }
+    const name = decodeURIComponent(parts.at(-1)!)
+    const tag = decodeURIComponent(parts.slice(4, -1).join('/'))
+    if (tag !== releaseTag || !name.toLowerCase().endsWith('.zip') || name.includes('/') || name.includes('\\'))
+      return null
+    url.hash = ''
+    url.search = ''
+    return { name, url: url.href }
+  }
+  catch {
+    return null
+  }
+}
+
+function releaseAssetsFromHtml(html: string, route: RemoteThemeRoute, releaseTag: string): GitHubAsset[] {
+  const fragment = parseFragment(html)
+  const assets: GitHubAsset[] = []
+
+  function visit(node: HtmlNode, listItem?: HtmlElement): void {
+    const currentItem = isHtmlElement(node) && node.tagName === 'li' ? node : listItem
+    if (isHtmlElement(node) && node.tagName === 'a') {
+      const href = htmlAttribute(node, 'href')
+      const asset = href ? releaseAssetUrl(href, route, releaseTag) : null
+      if (asset) {
+        assets.push({
+          id: stableNumericId(`asset:${asset.url}`),
+          name: asset.name,
+          browser_download_url: asset.url,
+          size: displayedAssetSize(currentItem ? htmlText(currentItem) : htmlText(node)),
+        })
+      }
+    }
+    if (!isHtmlParent(node))
+      return
+    for (const child of node.childNodes)
+      visit(child, currentItem)
+  }
+
+  visit(fragment)
+  return assets
+}
+
+async function limitedGitHubHtml(response: Response): Promise<string> {
+  const declaredLength = Number.parseInt(response.headers.get('content-length') ?? '', 10)
+  if (Number.isFinite(declaredLength) && declaredLength > GITHUB_RELEASE_PAGE_LIMIT)
+    throw new RemoteThemeError(502, 'github_release_page_too_large', 'GitHub release page exceeds the safety limit')
+  const bytes = new Uint8Array(await response.arrayBuffer())
+  if (bytes.byteLength > GITHUB_RELEASE_PAGE_LIMIT)
+    throw new RemoteThemeError(502, 'github_release_page_too_large', 'GitHub release page exceeds the safety limit')
+  return new TextDecoder().decode(bytes)
+}
+
+function releaseTagFromLocation(location: string, route: RemoteThemeRoute): string | null {
+  try {
+    const url = new URL(location, 'https://github.com')
+    const parts = url.pathname.split('/').filter(Boolean)
+    if (url.protocol !== 'https:'
+      || url.hostname !== 'github.com'
+      || parts.length < 5
+      || decodeURIComponent(parts[0]!).toLowerCase() !== route.owner.toLowerCase()
+      || decodeURIComponent(parts[1]!).toLowerCase() !== route.repo.toLowerCase()
+      || parts[2] !== 'releases'
+      || parts[3] !== 'tag') {
+      return null
+    }
+    const tag = decodeURIComponent(parts.slice(4).join('/'))
+    return tag && tag.length <= 255 && !/[\u0000-\u001f]/.test(tag) ? tag : null
+  }
+  catch {
+    return null
+  }
+}
+
+async function fetchLatestReleaseFromPages(
+  route: RemoteThemeRoute,
+  fetcher: typeof fetch,
+): Promise<GitHubRelease> {
+  const headers = {
+    accept: 'text/html',
+    'user-agent': 'komari-nodeget-theme-adapter',
+  }
+  const latestResponse = await fetcher(`https://github.com/${encodeURIComponent(route.owner)}/${encodeURIComponent(route.repo)}/releases/latest`, {
+    headers,
+    redirect: 'manual',
+  })
+  if (latestResponse.status === 404)
+    throw new RemoteThemeError(404, 'github_release_not_found', 'GitHub repository has no published release')
+  const tag = releaseTagFromLocation(latestResponse.headers.get('location') ?? '', route)
+  if (!tag)
+    throw new RemoteThemeError(502, 'github_release_page_invalid', `GitHub latest release page returned HTTP ${latestResponse.status} without a valid release redirect`)
+
+  const assetsResponse = await fetcher(`https://github.com/${encodeURIComponent(route.owner)}/${encodeURIComponent(route.repo)}/releases/expanded_assets/${encodeURIComponent(tag)}`, { headers })
+  if (!assetsResponse.ok)
+    throw new RemoteThemeError(502, 'github_release_assets_failed', `GitHub release assets request failed with HTTP ${assetsResponse.status}`)
+  const html = await limitedGitHubHtml(assetsResponse)
+  const assets = releaseAssetsFromHtml(html, route, tag)
+  const parsed = parseFragment(html)
+  const publishedCandidate = descendantAttribute(parsed, 'relative-time', 'datetime')
+  const publishedAt = publishedCandidate && Number.isFinite(Date.parse(publishedCandidate))
+    ? new Date(publishedCandidate).toISOString()
+    : new Date(0).toISOString()
+  return {
+    id: stableNumericId(`release:${route.repository.toLowerCase()}:${tag}`),
+    tag_name: tag,
+    published_at: publishedAt,
+    assets,
+  }
+}
+
 async function fetchLatestRelease(
   route: RemoteThemeRoute,
   env: RemoteThemeEnvironment,
@@ -424,23 +644,30 @@ async function fetchLatestRelease(
   const response = await fetcher(`https://api.github.com/repos/${encodeURIComponent(route.owner)}/${encodeURIComponent(route.repo)}/releases/latest`, {
     headers,
   })
+  let release: GitHubRelease
   if (!response.ok) {
-    const code = response.status === 404 ? 'github_release_not_found' : 'github_release_failed'
-    throw new RemoteThemeError(response.status === 404 ? 404 : 502, code, `GitHub latest release request failed with HTTP ${response.status}`)
+    if (response.status === 403 || response.status === 429 || response.status >= 500)
+      release = await fetchLatestReleaseFromPages(route, fetcher)
+    else {
+      const code = response.status === 404 ? 'github_release_not_found' : 'github_release_failed'
+      throw new RemoteThemeError(response.status === 404 ? 404 : 502, code, `GitHub latest release request failed with HTTP ${response.status}`)
+    }
   }
-  const value: unknown = await response.json()
-  if (!isRecord(value)
-    || !Number.isSafeInteger(value.id)
-    || typeof value.tag_name !== 'string'
-    || typeof value.published_at !== 'string'
-    || !Array.isArray(value.assets)) {
-    throw new RemoteThemeError(502, 'github_release_invalid', 'GitHub latest release response is invalid')
-  }
-  const release: GitHubRelease = {
-    id: value.id as number,
-    tag_name: value.tag_name,
-    published_at: value.published_at,
-    assets: value.assets.filter(validGitHubAsset),
+  else {
+    const value: unknown = await response.json()
+    if (!isRecord(value)
+      || !Number.isSafeInteger(value.id)
+      || typeof value.tag_name !== 'string'
+      || typeof value.published_at !== 'string'
+      || !Array.isArray(value.assets)) {
+      throw new RemoteThemeError(502, 'github_release_invalid', 'GitHub latest release response is invalid')
+    }
+    release = {
+      id: value.id as number,
+      tag_name: value.tag_name,
+      published_at: value.published_at,
+      assets: value.assets.filter(validGitHubAsset),
+    }
   }
   const asset = selectReleaseAsset(release)
   if (asset.size <= 0 || asset.size > REMOTE_THEME_INPUT_LIMIT) {
@@ -930,7 +1157,7 @@ export async function handleRemoteTheme(
       repository: route.repository,
       channel: 'latest',
       theme_url: baseUrl,
-      nodeget_import_url: `https://dash.nodeget.com/#/dashboard/theme-management?add=${encodeURIComponent(baseUrl)}`,
+      nodeget_import_url: nodeGetImportUrl(baseUrl, env.NODEGET_DASHBOARD_URL),
       update_mode: 'manual-remote-update',
     })
   }
