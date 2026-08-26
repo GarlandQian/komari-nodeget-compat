@@ -132,18 +132,13 @@ a:focus-visible,
   text-decoration: none;
 }
 
-.brand-mark {
-  display: grid;
+.brand-logo {
+  display: block;
   flex: 0 0 38px;
   width: 38px;
   height: 38px;
-  place-items: center;
-  border: 1px solid var(--accent);
-  border-radius: 6px;
-  color: var(--accent-text);
-  background: var(--accent-soft);
-  font-size: 12px;
-  font-weight: 800;
+  border-radius: 50%;
+  object-fit: contain;
 }
 
 .brand-copy {
@@ -844,7 +839,7 @@ a:focus-visible,
     padding: 11px 14px;
   }
 
-  .brand-mark {
+  .brand-logo {
     width: 34px;
     height: 34px;
     flex-basis: 34px;

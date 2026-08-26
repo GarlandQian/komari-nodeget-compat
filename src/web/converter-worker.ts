@@ -1,6 +1,8 @@
 import { convertThemeArchive } from '../converter/archive'
+import type { ThemeAppearance } from '../converter/appearance'
 
 interface ConvertRequest {
+  appearance?: ThemeAppearance
   id: number
   input: ArrayBuffer
   runtime: ArrayBuffer
@@ -33,9 +35,10 @@ interface WorkerScope {
 const scope = globalThis as unknown as WorkerScope
 
 scope.addEventListener('message', (event) => {
-  const { id, input, runtime } = event.data
+  const { appearance, id, input, runtime } = event.data
   try {
     const result = convertThemeArchive(new Uint8Array(input), {
+      ...(appearance ? { appearance } : {}),
       runtime: new Uint8Array(runtime),
     })
     const archive = result.archive.slice().buffer as ArrayBuffer

@@ -2,6 +2,10 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+export function environmentFlagEnabled(value: string | undefined): boolean {
+  return /^(1|true|yes|on)$/i.test(value?.trim() ?? '')
+}
+
 export function parseJsonValue<T>(value: unknown, fallback: T): T {
   if (value == null)
     return fallback

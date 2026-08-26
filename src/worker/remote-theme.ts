@@ -1,6 +1,13 @@
 import type { ConversionMetadata } from '../converter/archive'
 import { convertThemeEntries } from '../converter/archive'
+import type { ThemeAppearance } from '../converter/appearance'
+import {
+  applyThemeAppearanceToConfig,
+  applyThemeAppearanceToManifest,
+  rewriteThemeAppearanceText,
+} from '../converter/appearance'
 import { rewriteRemoteTextAssetReferences, rewriteRemoteThemeAssets } from '../converter/html'
+import { environmentFlagEnabled, isRecord } from '../shared/utils'
 
 export const REMOTE_THEME_INPUT_LIMIT = 32 * 1024 * 1024
 export const REMOTE_THEME_EXPANDED_LIMIT = 72 * 1024 * 1024
@@ -60,11 +67,22 @@ export interface ThemeCacheBucket {
 }
 
 export interface RemoteThemeEnvironment {
+  ACG_BACKGROUND_ENABLED?: string
   ASSETS: AssetFetcher
   THEME_CACHE?: ThemeCacheBucket
   ALLOWED_GITHUB_REPOSITORIES?: string
   RELEASE_CHECK_TTL_SECONDS?: string
   GITHUB_API_TOKEN?: string
+}
+
+function themeAppearance(request: Request, env: RemoteThemeEnvironment): ThemeAppearance {
+  const origin = new URL(request.url).origin
+  return {
+    logoUrl: `${origin}/nodeget-logo.png`,
+    ...(environmentFlagEnabled(env.ACG_BACKGROUND_ENABLED)
+      ? { backgroundUrl: `${origin}/api/acg-background` }
+      : {}),
+  }
 }
 
 interface RemoteThemeDependencies {
@@ -150,10 +168,6 @@ class RemoteThemeError extends Error {
 const aliasMemory = new Map<string, BundleAlias>()
 const indexMemory = new Map<string, BundleIndex>()
 const activeBuilds = new Map<string, Promise<BundleAlias>>()
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 function jsonHeaders(): Headers {
   return new Headers({
@@ -795,7 +809,10 @@ async function servePackedFile(
   const headers = fileHeaders(route, alias, file)
   const bucket = env.THEME_CACHE!
   if (route.channel === 'latest' && route.filePath === 'nodeget-theme.json') {
-    const value = await readNodeGetManifest(bucket, alias, index)
+    const value = applyThemeAppearanceToManifest(
+      await readNodeGetManifest(bucket, alias, index),
+      themeAppearance(request, env),
+    )
     value.dist_page = `${new URL(request.url).origin}${route.basePath}`
     const body = `${JSON.stringify(value, null, 2)}\n`
     return textResponse(request, headers, body, 'latest')
@@ -806,14 +823,23 @@ async function servePackedFile(
     return textResponse(request, headers, body, 'latest')
   }
 
+  if (route.channel === 'latest' && route.filePath === 'config.json') {
+    const value: unknown = JSON.parse(new TextDecoder().decode(await readPackedFileBytes(bucket, alias, file)))
+    if (!isRecord(value))
+      throw new RemoteThemeError(502, 'theme_config_invalid', 'Converted NodeGet theme config is invalid')
+    const body = `${JSON.stringify(applyThemeAppearanceToConfig(value, themeAppearance(request, env)), null, 2)}\n`
+    return textResponse(request, headers, body, 'latest')
+  }
+
   if (remoteTextFile(route.filePath)) {
     if (route.channel === 'release' && request.headers.get('if-none-match') === headers.get('etag'))
       return notModifiedResponse(headers)
     const source = new TextDecoder().decode(await readPackedFileBytes(bucket, alias, file))
     const remoteBase = `${new URL(request.url).origin}${releaseBasePath(route, alias.asset.id)}`
+    const branded = rewriteThemeAppearanceText(source, themeAppearance(request, env))
     const body = route.filePath === 'index.html'
-      ? rewriteRemoteThemeAssets(source, remoteBase, index.metadata.sourceShort)
-      : rewriteRemoteTextAssetReferences(source, remoteBase, index.metadata.sourceShort)
+      ? rewriteRemoteThemeAssets(branded, remoteBase, index.metadata.sourceShort)
+      : rewriteRemoteTextAssetReferences(branded, remoteBase, index.metadata.sourceShort)
     return textResponse(request, headers, body, route.channel)
   }
 

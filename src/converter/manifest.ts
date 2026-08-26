@@ -1,5 +1,7 @@
 import type { CompatManifest } from '../types'
 import { isRecord, localizedText } from '../shared/utils'
+import type { ThemeAppearance } from './appearance'
+import { applyThemeAppearanceToConfig, applyThemeAppearanceToManifest } from './appearance'
 
 export interface KomariConfigurationItem {
   key?: string
@@ -43,6 +45,7 @@ export interface ConvertedManifests {
 }
 
 export interface ConvertManifestOptions {
+  appearance?: ThemeAppearance
   distPage?: string
 }
 
@@ -196,7 +199,12 @@ export function convertManifests(
     user_preferences: defaultPreferences,
     site_tokens: [],
   }
-  return { nodeget, compat, defaultConfig, warnings }
+  return {
+    nodeget: applyThemeAppearanceToManifest(nodeget, options.appearance),
+    compat,
+    defaultConfig: applyThemeAppearanceToConfig(defaultConfig, options.appearance),
+    warnings,
+  }
 }
 
 export function previewOutputName(preview: string | undefined): string {

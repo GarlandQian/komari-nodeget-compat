@@ -11,14 +11,22 @@ import {
 function sourceTheme(version = '2.0.0'): Uint8Array {
   return zipSync({
     'komari-theme.json': strToU8(JSON.stringify({
-      name: 'Remote Fixture',
+      name: 'Komari Remote Fixture',
       short: 'RemoteFixture',
       version,
-      configuration: { type: 'managed', data: [] },
+      configuration: {
+        type: 'managed',
+        data: [
+          { key: 'backgroundEnabled', type: 'switch', name: '背景', default: false },
+          { key: 'backgroundType', type: 'select', name: '类型', options: ['image', 'video'], default: 'image' },
+          { key: 'lightBackgroundUrl', type: 'string', name: '亮色背景', default: '' },
+          { key: 'darkBackgroundUrl', type: 'string', name: '暗色背景', default: '' },
+        ],
+      },
     })),
     'preview.png': new Uint8Array([1, 2, 3]),
-    'dist/index.html': strToU8('<!doctype html><html><head><script type="module" src="/assets/app.js"></script></head><body><img src="/images/logo.png">remote</body></html>'),
-    'dist/assets/app.js': strToU8(`globalThis.remoteFixture="${version}";globalThis.logo="/images/logo.png";globalThis.preload="assets/lazy.css"`),
+    'dist/index.html': strToU8('<!doctype html><html><head><title>Komari Monitor</title><link rel="icon" href="/favicon.ico"><script type="module" src="/assets/app.js"></script></head><body><img src="/images/logo.png">remote</body></html>'),
+    'dist/assets/app.js': strToU8(`globalThis.remoteFixture="${version}";globalThis.brand="Komari Monitor";globalThis.favicon="/favicon.ico";globalThis.logo="/images/logo.png";globalThis.preload="assets/lazy.css"`),
     'dist/images/logo.png': new Uint8Array([4, 5, 6]),
   })
 }
@@ -134,6 +142,7 @@ describe('remote NodeGet theme distribution', () => {
     const bucket = new MemoryBucket()
     const { fetcher, calls } = fixtureFetch(source)
     const env = environment(bucket)
+    env.ACG_BACKGROUND_ENABLED = 'true'
     const base = 'https://adapter.example/themes/github/test-owner/test-theme/latest'
 
     const manifestResponse = await handleRemoteTheme(
@@ -146,6 +155,8 @@ describe('remote NodeGet theme distribution', () => {
     expect(manifest.short).toBe('NG-RemoteFixture')
     expect(manifest.version).toBe('2.0.0')
     expect(manifest.dist_page).toBe(base)
+    expect(manifest.name).toBe('NodeGet Remote Fixture')
+    expect(JSON.stringify(manifest)).not.toContain('Komari Remote Fixture')
     expect(manifestResponse?.headers.get('access-control-allow-origin')).toBe('*')
 
     const manifestHead = await handleRemoteTheme(
@@ -187,6 +198,8 @@ describe('remote NodeGet theme distribution', () => {
     const pinnedBase = 'https://adapter.example/themes/github/test-owner/test-theme/releases/30/v1'
     expect(html).toContain(`${pinnedBase}/assets/app.js`)
     expect(html).toContain(`${pinnedBase}/images/logo.png`)
+    expect(html).toContain('https://adapter.example/nodeget-logo.png')
+    expect(html).toContain('<title>NodeGet Monitor</title>')
     expect(html).toContain('./komari-nodeget-runtime.js')
     expect(html).toContain('./custom.css')
     expect(html).toContain('./custom.js')
@@ -196,7 +209,7 @@ describe('remote NodeGet theme distribution', () => {
       env,
       { fetcher, now: () => 1_000_200 },
     )
-    expect(await assetResponse!.text()).toBe(`globalThis.remoteFixture="2.0.0";globalThis.logo="${pinnedBase}/images/logo.png";globalThis.preload="${pinnedBase}/assets/lazy.css"`)
+    expect(await assetResponse!.text()).toBe(`globalThis.remoteFixture="2.0.0";globalThis.brand="NodeGet Monitor";globalThis.favicon="https://adapter.example/nodeget-logo.png";globalThis.logo="${pinnedBase}/images/logo.png";globalThis.preload="${pinnedBase}/assets/lazy.css"`)
     expect(assetResponse?.headers.get('content-type')).toContain('text/javascript')
     expect(assetResponse?.headers.get('cache-control')).toBe('public, max-age=31536000, immutable')
     const cachedAssetResponse = await handleRemoteTheme(
@@ -216,6 +229,21 @@ describe('remote NodeGet theme distribution', () => {
     )
     expect(new Uint8Array(await imageResponse!.arrayBuffer())).toEqual(new Uint8Array([4, 5, 6]))
     expect(imageResponse?.headers.get('cache-control')).toBe('public, max-age=31536000, immutable')
+
+    const configResponse = await handleRemoteTheme(
+      new Request(`${base}/config.json`),
+      env,
+      { fetcher, now: () => 1_000_275 },
+    )
+    const config = await configResponse!.json() as { user_preferences: Record<string, unknown> }
+    expect(config.user_preferences).toMatchObject({
+      backgroundEnabled: true,
+      backgroundType: 'image',
+      lightBackgroundUrl: 'https://adapter.example/api/acg-background',
+      darkBackgroundUrl: 'https://adapter.example/api/acg-background',
+      site_name: 'NodeGet Remote Fixture',
+      site_title: 'NodeGet Remote Fixture',
+    })
     expect(calls).toEqual({ api: 1, asset: 1 })
     expect(bucket.puts).toBe(3)
     expect([...bucket.objects.keys()].some(key => key.endsWith('/theme.pack'))).toBe(true)

@@ -67,6 +67,7 @@ await buildFile('src/web/converter-worker.ts', 'dist/web/assets/converter-worker
 
 await Promise.all([
   copyFile('src/web/index.html', 'dist/web/index.html'),
+  copyFile('src/web/nodeget-logo.png', 'dist/web/nodeget-logo.png'),
   copyFile('src/web/styles.css', 'dist/web/assets/styles.css'),
   copyFile('src/web/_headers', 'dist/web/_headers'),
   copyFile('src/web/robots.txt', 'dist/web/robots.txt'),

@@ -55,6 +55,11 @@ interface PublicConfig {
   remote_theme_repositories?: string[]
 }
 
+interface ConversionAppearance {
+  backgroundUrl?: string
+  logoUrl: string
+}
+
 function element<T extends HTMLElement>(id: string): T {
   const value = document.getElementById(id)
   if (!(value instanceof HTMLElement))
@@ -118,6 +123,7 @@ let conversionId = 0
 let dragDepth = 0
 let lastBackgroundRefresh = 0
 let backgroundAvailable = false
+let publicFeaturesReady: Promise<void> = Promise.resolve()
 
 function setView(state: ViewState): void {
   for (const [name, view] of Object.entries(views))
@@ -166,7 +172,12 @@ function runtimeBytes(): Promise<Uint8Array> {
     .then(buffer => new Uint8Array(buffer))
 }
 
-function convertInWorker(input: ArrayBuffer, runtime: ArrayBuffer, id: number): Promise<ConvertSuccess> {
+function convertInWorker(
+  input: ArrayBuffer,
+  runtime: ArrayBuffer,
+  appearance: ConversionAppearance,
+  id: number,
+): Promise<ConvertSuccess> {
   return new Promise((resolve, reject) => {
     const worker = new Worker(new URL('./converter-worker.js', import.meta.url), { type: 'module' })
     activeWorker = worker
@@ -196,8 +207,17 @@ function convertInWorker(input: ArrayBuffer, runtime: ArrayBuffer, id: number): 
         activeWorker = null
       reject(new Error(event.message || '浏览器转换线程异常'))
     })
-    worker.postMessage({ id, input, runtime }, [input, runtime])
+    worker.postMessage({ appearance, id, input, runtime }, [input, runtime])
   })
+}
+
+function conversionAppearance(): ConversionAppearance {
+  return {
+    logoUrl: new URL('/nodeget-logo.png', window.location.origin).href,
+    ...(backgroundAvailable
+      ? { backgroundUrl: new URL('/api/acg-background', window.location.origin).href }
+      : {}),
+  }
 }
 
 function renderResult(file: File, result: ConvertSuccess): void {
@@ -242,6 +262,7 @@ async function processFile(file: File): Promise<void> {
   element('busy-message').textContent = '正在检查主题包结构'
 
   try {
+    await publicFeaturesReady
     if (!file.name.toLowerCase().endsWith('.zip'))
       throw new Error('请选择 ZIP 格式的 Komari 主题包')
     if (file.size === 0)
@@ -257,7 +278,12 @@ async function processFile(file: File): Promise<void> {
 
     showSelectedFile(file, '转换中')
     element('busy-message').textContent = '正在生成 NodeGet 兼容主题包'
-    const result = await convertInWorker(input, runtime.slice().buffer as ArrayBuffer, id)
+    const result = await convertInWorker(
+      input,
+      runtime.slice().buffer as ArrayBuffer,
+      conversionAppearance(),
+      id,
+    )
     if (id !== conversionId)
       return
     renderResult(file, result)
@@ -376,7 +402,7 @@ async function copyRemoteThemeUrl(): Promise<void> {
 
 function backgroundEndpoint(): string {
   const portrait = window.innerHeight > window.innerWidth
-  return `https://api.yppp.net/${portrait ? 'pe.php' : 'pc.php'}?komari-nodeget=${Date.now()}`
+  return `/api/acg-background?orientation=${portrait ? 'portrait' : 'landscape'}&nonce=${Date.now()}`
 }
 
 function refreshBackground(): void {
@@ -429,7 +455,7 @@ setIcon('icon-open-nodeget', ExternalLink)
 setIcon('icon-remote-update', RefreshCw)
 initializeTheme()
 updateBackgroundControls()
-void initializePublicFeatures()
+publicFeaturesReady = initializePublicFeatures()
 
 dropZone.addEventListener('click', selectedUpload)
 dropZone.addEventListener('keydown', (event) => {
