@@ -40,7 +40,7 @@ export default {
     if (request.method === 'GET' && url.pathname === '/api/health') {
       return json({
         status: 'ok',
-        version: '0.3.0',
+        version: '0.3.1',
         conversion: 'browser-local',
         remote_distribution: env.THEME_CACHE ? 'r2' : 'unavailable',
         remote_theme_repositories: repositories.length,

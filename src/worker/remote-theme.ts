@@ -793,6 +793,26 @@ function notModifiedResponse(headers: Headers): Response {
   return new Response(null, { status: 304, headers })
 }
 
+async function serveLatestRuntime(
+  request: Request,
+  env: RemoteThemeEnvironment,
+  headers: Headers,
+): Promise<Response> {
+  const runtimeResponse = await env.ASSETS.fetch(new Request(
+    new URL('/komari-nodeget-runtime.js', request.url),
+  ))
+  if (!runtimeResponse.ok)
+    throw new RemoteThemeError(500, 'runtime_unavailable', `Compatibility runtime is unavailable (HTTP ${runtimeResponse.status})`)
+
+  const bytes = new Uint8Array(await runtimeResponse.arrayBuffer())
+  headers.set('cache-control', 'no-store')
+  headers.set('content-length', String(bytes.byteLength))
+  headers.set('content-type', runtimeResponse.headers.get('content-type') ?? 'text/javascript; charset=utf-8')
+  headers.delete('etag')
+  headers.delete('last-modified')
+  return new Response(request.method === 'HEAD' ? null : bytes, { status: 200, headers })
+}
+
 async function servePackedFile(
   request: Request,
   route: RemoteThemeRoute,
@@ -808,6 +828,9 @@ async function servePackedFile(
 
   const headers = fileHeaders(route, alias, file)
   const bucket = env.THEME_CACHE!
+  if (route.channel === 'latest' && route.filePath === 'komari-nodeget-runtime.js')
+    return serveLatestRuntime(request, env, headers)
+
   if (route.channel === 'latest' && route.filePath === 'nodeget-theme.json') {
     const value = applyThemeAppearanceToManifest(
       await readNodeGetManifest(bucket, alias, index),

@@ -48,6 +48,11 @@ const DYNAMIC_FIELDS = [
   'receive_speed',
 ] as const
 
+const GIBIBYTE_BYTES = 1024 ** 3
+const TRAFFIC_EXTENSION_BILLING_MODES = new Set(['quota', 'payg'])
+const TRAFFIC_EXTENSION_PERIODS = new Set(['hourly', 'daily', 'weekly', 'monthly', 'never'])
+const TRAFFIC_LIMIT_TYPES = new Set(['sum', 'max', 'min', 'up', 'down'])
+
 const METADATA_KEYS = [
   'metadata_name',
   'metadata_region',
@@ -66,6 +71,8 @@ const METADATA_KEYS = [
   'metadata_group',
   'metadata_traffic_limit',
   'metadata_traffic_limit_type',
+  'metadata_billing_mode',
+  'metadata_traffic_period',
 ] as const
 
 const METRIC_DEFINITIONS: MetricDefinition[] = [
@@ -218,6 +225,35 @@ function tagsValue(value: unknown): string {
   return stringValue(parsed).replaceAll(',', ';')
 }
 
+function trafficLimitMetadata(kv: Record<string, unknown>): {
+  limit: number
+  type: KomariClient['traffic_limit_type']
+} {
+  const rawLimit = Math.max(0, finiteNumber(parseJsonValue(kv.metadata_traffic_limit, 0)))
+  const billingMode = stringValue(parseJsonValue(kv.metadata_billing_mode, '')).toLowerCase()
+  const period = stringValue(parseJsonValue(kv.metadata_traffic_period, '')).toLowerCase()
+  const extensionConfigured = TRAFFIC_EXTENSION_PERIODS.has(period)
+    && (TRAFFIC_EXTENSION_BILLING_MODES.has(billingMode) || rawLimit > 0)
+
+  if (extensionConfigured) {
+    if (billingMode === 'payg')
+      return { limit: 0, type: 'sum' }
+    const bytes = Math.round(rawLimit * GIBIBYTE_BYTES)
+    return {
+      limit: Math.min(bytes, Number.MAX_SAFE_INTEGER),
+      type: 'sum',
+    }
+  }
+
+  const rawType = stringValue(parseJsonValue(kv.metadata_traffic_limit_type, 'sum')).toLowerCase()
+  return {
+    limit: rawLimit,
+    type: TRAFFIC_LIMIT_TYPES.has(rawType)
+      ? rawType as KomariClient['traffic_limit_type']
+      : 'sum',
+  }
+}
+
 function recordFromStatus(status: KomariNodeStatus): KomariStatusRecord {
   const { online: _online, updated_at: _updatedAt, ...record } = status
   return record
@@ -312,7 +348,7 @@ export class NodeGetSource {
       const provider = stringValue(parseJsonValue(kv.metadata_provider, ''))
       const expireTime = stringValue(parseJsonValue(kv.metadata_expire_time, ''))
       const physicalCores = finiteNumber(cpu.physical_cores)
-      const trafficLimitType = stringValue(parseJsonValue(kv.metadata_traffic_limit_type, 'sum'))
+      const traffic = trafficLimitMetadata(kv)
 
       clients[uuid] = {
         uuid,
@@ -346,10 +382,8 @@ export class NodeGetSource {
         group: stringValue(parseJsonValue(kv.metadata_group, region), region || this.name),
         tags: tagsValue(kv.metadata_tags),
         hidden: booleanValue(kv.metadata_hidden),
-        traffic_limit: finiteNumber(parseJsonValue(kv.metadata_traffic_limit, 0)),
-        traffic_limit_type: ['sum', 'max', 'min', 'up', 'down'].includes(trafficLimitType)
-          ? trafficLimitType as KomariClient['traffic_limit_type']
-          : 'sum',
+        traffic_limit: traffic.limit,
+        traffic_limit_type: traffic.type,
         created_at: '',
         updated_at: '',
       }
