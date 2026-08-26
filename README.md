@@ -2,7 +2,7 @@
 
 将遵循 Komari 公共主题规范的主题 ZIP 转换为 NodeGet 可导入主题包。项目提供浏览器转换器、Bun CLI，以及可供 NodeGet 直接导入的 Cloudflare Worker 远程分发地址，采用 MIT 许可证开源。
 
-本地 ZIP 模式只在访问者浏览器中解压、转换和重新打包，文件不会上传。远程分发模式由 Worker 下载白名单内的公开 GitHub Release ZIP，将转换结果保存为私有 R2 数据包，始终不接收或保存 NodeGet Token。
+本地 ZIP 模式只在访问者浏览器中解压、转换和重新打包，文件不会上传。远程分发模式由 Worker 下载白名单内的公开 GitHub Release ZIP，将转换结果保存为私有 R2 数据包，并为 NodeGet 提供轻量安装清单；两种模式都不接收或保存 NodeGet Token。
 
 ## 当前能力
 
@@ -26,7 +26,9 @@
 }
 ```
 
-导入主题后，在 NodeGet 主题管理面板配置 RPC 地址和只读 Token。转换器、Cloudflare Worker、GitHub Actions 与仓库均不需要真实 Token。
+导入主题后，在 NodeGet 的 `主题管理 -> 对应主题 -> Token 授权` 中添加“本机 纯监控”或“本机 监控+ping”预设并点击“确定”。也可以手动填写 NodeGet 面板中的后端地址和只读 Token；运行时同时接受面板保存的 `http(s)://` 站点地址、无路径的 `ws(s)://` 地址和完整的 `ws(s)://.../nodeget/rpc` 地址。转换器、Cloudflare Worker、GitHub Actions 与仓库均不需要真实 Token。
+
+转换产物默认 Token 为空是有意的安全行为。主题能打开但没有服务器信息时，先检查上述 `Token 授权` 页面；未配置 `site_tokens` 时运行时不会连接任何 NodeGet 后端。修改后刷新主题页面即可。
 
 NodeGet 当前会把主题配置提供给访问者浏览器，因此公开主题 Token 仍然可见，必须使用最小只读权限。参考 [docs/nodeget-minimal-token.md](docs/nodeget-minimal-token.md)。
 
@@ -40,7 +42,9 @@ https://<WORKER_DOMAIN>/themes/github/<OWNER>/<REPOSITORY>/latest
 
 把该地址填入 NodeGet 主题管理的“从远程导入”，或使用转换器页面生成的“在 NodeGet 导入”链接。首次访问时 Worker 会解析 GitHub 最新 Release、转换唯一或最匹配的 ZIP 资源并写入 R2；后续文件直接从 R2 Range 读取。
 
-NodeGet 会把远程文件复制到自己的主题桶，不会持续挂载 Worker。上游发布新版后，在 NodeGet 主题管理中点击“从远程更新”即可获取最新版；这不是后台静默自动更新。完整说明见 [docs/remote-distribution.md](docs/remote-distribution.md)。
+为避免 NodeGet 串行下载数百个文件导致导入长时间无响应，远程清单只让 NodeGet 保存入口、兼容运行时、配置和预览等少量文件；原主题的 JS、CSS、图片和字体继续从 Worker 的固定 Release 地址加载。固定地址不会随 `latest` 改变，所以已安装版本不会被后续发布破坏。远程安装后的主题需要 Worker 保持可访问；需要完全独立于 Worker 时使用本地 ZIP 转换模式。
+
+上游发布新版后，在 NodeGet 主题管理中点击“从远程更新”即可获取最新版；这不是后台静默自动更新。完整说明见 [docs/remote-distribution.md](docs/remote-distribution.md)。
 
 ## 本地开发
 

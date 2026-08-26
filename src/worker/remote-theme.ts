@@ -1,5 +1,6 @@
 import type { ConversionMetadata } from '../converter/archive'
 import { convertThemeEntries } from '../converter/archive'
+import { rewriteRemoteTextAssetReferences, rewriteRemoteThemeAssets } from '../converter/html'
 
 export const REMOTE_THEME_INPUT_LIMIT = 32 * 1024 * 1024
 export const REMOTE_THEME_EXPANDED_LIMIT = 72 * 1024 * 1024
@@ -9,6 +10,27 @@ const DEFAULT_RELEASE_CHECK_TTL_SECONDS = 300
 const MIN_RELEASE_CHECK_TTL_SECONDS = 60
 const MAX_RELEASE_CHECK_TTL_SECONDS = 86_400
 const ROUTE_PREFIX = '/themes/github/'
+const REMOTE_ASSET_VERSION = 'v1'
+const REMOTE_INSTALL_FILES = [
+  'nodeget-theme.json',
+  'nodeget-theme-files.json',
+  'index.html',
+  'komari-nodeget-runtime.js',
+  'komari-compat.json',
+  'config.json',
+  'custom.css',
+  'custom.js',
+]
+const REMOTE_TEXT_EXTENSIONS = new Set([
+  '.css',
+  '.html',
+  '.js',
+  '.json',
+  '.mjs',
+  '.svg',
+  '.webmanifest',
+  '.xml',
+])
 
 export interface AssetFetcher {
   fetch(request: Request): Promise<Response>
@@ -50,13 +72,18 @@ interface RemoteThemeDependencies {
   now?: () => number
 }
 
-interface RemoteThemeRoute {
+interface RemoteThemeRouteBase {
   owner: string
   repo: string
   repository: string
   filePath: string
   basePath: string
 }
+
+type RemoteThemeRoute = RemoteThemeRouteBase & (
+  | { channel: 'latest' }
+  | { channel: 'release', assetId: number, assetVersion: typeof REMOTE_ASSET_VERSION }
+)
 
 interface GitHubAsset {
   id: number
@@ -177,29 +204,56 @@ export function parseRemoteThemeRoute(pathname: string): RemoteThemeRoute | null
   if (!pathname.startsWith(ROUTE_PREFIX))
     return null
   const segments = pathname.split('/')
-  if (segments[1] !== 'themes' || segments[2] !== 'github' || segments[5] !== 'latest')
-    throw new RemoteThemeError(404, 'invalid_theme_route', 'Remote theme route must end with /latest')
+  if (segments[1] !== 'themes' || segments[2] !== 'github')
+    throw new RemoteThemeError(404, 'invalid_theme_route', 'Remote theme route is invalid')
 
   const owner = decodedSegment(segments[3], 'owner')
   const repo = decodedSegment(segments[4], 'repository')
   if (!validRepositoryPart(owner) || !validRepositoryPart(repo))
     throw new RemoteThemeError(400, 'invalid_repository', 'GitHub owner or repository name is invalid')
 
-  const fileSegments = segments.slice(6).map((segment) => {
+  let channel: RemoteThemeRoute['channel']
+  let assetId: number | undefined
+  let fileStart: number
+  if (segments[5] === 'latest') {
+    channel = 'latest'
+    fileStart = 6
+  }
+  else if (segments[5] === 'releases') {
+    const asset = decodedSegment(segments[6], 'release asset ID')
+    if (!/^\d+$/.test(asset) || !Number.isSafeInteger(Number(asset)) || Number(asset) <= 0)
+      throw new RemoteThemeError(400, 'invalid_release_asset', 'GitHub release asset ID is invalid')
+    if (segments[7] !== REMOTE_ASSET_VERSION)
+      throw new RemoteThemeError(404, 'unsupported_asset_version', 'Remote theme asset protocol version is unsupported')
+    channel = 'release'
+    assetId = Number(asset)
+    fileStart = 8
+  }
+  else {
+    throw new RemoteThemeError(404, 'invalid_theme_route', 'Remote theme route must contain /latest or /releases/<asset-id>')
+  }
+
+  const fileSegments = segments.slice(fileStart).map((segment) => {
     const decoded = decodedSegment(segment, 'file path')
     if (!decoded || decoded === '.' || decoded === '..' || decoded.includes('/') || decoded.includes('\\') || decoded.includes('\0'))
       throw new RemoteThemeError(400, 'invalid_file_path', 'Remote theme file path is invalid')
     return decoded
   })
   const filePath = fileSegments.join('/')
-  const basePath = `${ROUTE_PREFIX}${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/latest`
-  return {
+  const repositoryPath = `${ROUTE_PREFIX}${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+  const basePath = channel === 'latest'
+    ? `${repositoryPath}/latest`
+    : `${repositoryPath}/releases/${assetId}/${REMOTE_ASSET_VERSION}`
+  const base = {
     owner,
     repo,
     repository: `${owner}/${repo}`,
     filePath,
     basePath,
   }
+  return channel === 'latest'
+    ? { ...base, channel }
+    : { ...base, channel, assetId: assetId!, assetVersion: REMOTE_ASSET_VERSION }
 }
 
 export function allowedGitHubRepositories(value: string | undefined): string[] {
@@ -231,6 +285,10 @@ function bundleKeys(route: RemoteThemeRoute, assetId: number): BundleAlias['bund
     packKey: `${prefix}/theme.pack`,
     indexKey: `${prefix}/index.json`,
   }
+}
+
+function releaseBasePath(route: RemoteThemeRoute, assetId: number): string {
+  return `${ROUTE_PREFIX}${encodeURIComponent(route.owner)}/${encodeURIComponent(route.repo)}/releases/${assetId}/${REMOTE_ASSET_VERSION}`
 }
 
 function validGitHubAsset(value: unknown): value is GitHubAsset {
@@ -608,11 +666,42 @@ async function resolveBundle(
   return build
 }
 
+async function resolvePinnedBundle(
+  route: RemoteThemeRoute & { channel: 'release' },
+  env: RemoteThemeEnvironment,
+  now: number,
+): Promise<{ alias: BundleAlias, index: BundleIndex }> {
+  const bucket = env.THEME_CACHE
+  if (!bucket)
+    throw new RemoteThemeError(503, 'theme_cache_unavailable', 'R2 theme cache binding is not configured')
+
+  const bundle = bundleKeys(route, route.assetId)
+  const index = await readBundleIndex(bucket, bundle.indexKey)
+  if (!index
+    || index.asset.id !== route.assetId
+    || index.repository.toLowerCase() !== route.repository.toLowerCase()) {
+    throw new RemoteThemeError(404, 'release_not_cached', 'Requested theme release is not available in the remote cache')
+  }
+  return {
+    index,
+    alias: {
+      schema: 1,
+      checkedAt: now,
+      repository: index.repository,
+      release: index.release,
+      asset: index.asset,
+      bundle,
+    },
+  }
+}
+
 function fileHeaders(route: RemoteThemeRoute, alias: BundleAlias, file: PackedFile): Headers {
   return new Headers({
     'access-control-allow-origin': '*',
     'access-control-expose-headers': 'Content-Length, ETag, X-Komari-Release',
-    'cache-control': 'no-cache',
+    'cache-control': route.channel === 'release'
+      ? 'public, max-age=31536000, immutable'
+      : 'no-cache',
     'content-length': String(file.length),
     'content-type': file.contentType,
     etag: `"${alias.asset.id}-${file.offset}-${file.length}"`,
@@ -622,6 +711,72 @@ function fileHeaders(route: RemoteThemeRoute, alias: BundleAlias, file: PackedFi
     'x-komari-release': alias.release.tag,
     'x-remote-theme': route.repository,
   })
+}
+
+async function readPackedFileBytes(
+  bucket: ThemeCacheBucket,
+  alias: BundleAlias,
+  file: PackedFile,
+): Promise<Uint8Array> {
+  if (file.length === 0)
+    return new Uint8Array()
+  const object = await bucket.get(alias.bundle.packKey, {
+    range: { offset: file.offset, length: file.length },
+  })
+  if (!object)
+    throw new RemoteThemeError(503, 'theme_cache_incomplete', 'Cached theme data is missing')
+  return new Uint8Array(await object.arrayBuffer())
+}
+
+function textResponse(
+  request: Request,
+  headers: Headers,
+  body: string,
+  cacheMode: 'latest' | 'release',
+): Response {
+  headers.set('content-length', String(new TextEncoder().encode(body).byteLength))
+  if (cacheMode === 'latest') {
+    headers.set('cache-control', 'no-store')
+    headers.delete('etag')
+  }
+  return new Response(request.method === 'HEAD' ? null : body, { status: 200, headers })
+}
+
+async function readNodeGetManifest(
+  bucket: ThemeCacheBucket,
+  alias: BundleAlias,
+  index: BundleIndex,
+): Promise<Record<string, unknown>> {
+  const file = Object.hasOwn(index.files, 'nodeget-theme.json')
+    ? index.files['nodeget-theme.json']
+    : undefined
+  if (!file)
+    throw new RemoteThemeError(502, 'theme_manifest_invalid', 'Converted NodeGet theme manifest is missing')
+  const value: unknown = JSON.parse(new TextDecoder().decode(await readPackedFileBytes(bucket, alias, file)))
+  if (!isRecord(value))
+    throw new RemoteThemeError(502, 'theme_manifest_invalid', 'Converted NodeGet theme manifest is invalid')
+  return value
+}
+
+async function remoteInstallFileList(
+  bucket: ThemeCacheBucket,
+  alias: BundleAlias,
+  index: BundleIndex,
+): Promise<string[]> {
+  const manifest = await readNodeGetManifest(bucket, alias, index)
+  const preview = typeof manifest.preview === 'string' ? manifest.preview : ''
+  return [...new Set([...REMOTE_INSTALL_FILES, preview])]
+    .filter(path => path && Object.hasOwn(index.files, path))
+}
+
+function remoteTextFile(path: string): boolean {
+  const dot = path.lastIndexOf('.')
+  return dot >= 0 && REMOTE_TEXT_EXTENSIONS.has(path.slice(dot).toLowerCase())
+}
+
+function notModifiedResponse(headers: Headers): Response {
+  headers.delete('content-length')
+  return new Response(null, { status: 304, headers })
 }
 
 async function servePackedFile(
@@ -639,36 +794,37 @@ async function servePackedFile(
 
   const headers = fileHeaders(route, alias, file)
   const bucket = env.THEME_CACHE!
-  if (route.filePath === 'nodeget-theme.json') {
-    const object = await bucket.get(alias.bundle.packKey, {
-      range: { offset: file.offset, length: file.length },
-    })
-    if (!object)
-      throw new RemoteThemeError(503, 'theme_cache_incomplete', 'Cached theme data is missing')
-    const value: unknown = JSON.parse(new TextDecoder().decode(await object.arrayBuffer()))
-    if (!isRecord(value))
-      throw new RemoteThemeError(502, 'theme_manifest_invalid', 'Converted NodeGet theme manifest is invalid')
+  if (route.channel === 'latest' && route.filePath === 'nodeget-theme.json') {
+    const value = await readNodeGetManifest(bucket, alias, index)
     value.dist_page = `${new URL(request.url).origin}${route.basePath}`
     const body = `${JSON.stringify(value, null, 2)}\n`
-    headers.set('content-length', String(new TextEncoder().encode(body).byteLength))
-    headers.set('cache-control', 'no-store')
-    headers.delete('etag')
-    return new Response(request.method === 'HEAD' ? null : body, { status: 200, headers })
+    return textResponse(request, headers, body, 'latest')
+  }
+
+  if (route.channel === 'latest' && route.filePath === 'nodeget-theme-files.json') {
+    const body = `${JSON.stringify(await remoteInstallFileList(bucket, alias, index), null, 2)}\n`
+    return textResponse(request, headers, body, 'latest')
+  }
+
+  if (remoteTextFile(route.filePath)) {
+    if (route.channel === 'release' && request.headers.get('if-none-match') === headers.get('etag'))
+      return notModifiedResponse(headers)
+    const source = new TextDecoder().decode(await readPackedFileBytes(bucket, alias, file))
+    const remoteBase = `${new URL(request.url).origin}${releaseBasePath(route, alias.asset.id)}`
+    const body = route.filePath === 'index.html'
+      ? rewriteRemoteThemeAssets(source, remoteBase, index.metadata.sourceShort)
+      : rewriteRemoteTextAssetReferences(source, remoteBase, index.metadata.sourceShort)
+    return textResponse(request, headers, body, route.channel)
   }
 
   if (request.headers.get('if-none-match') === headers.get('etag'))
-    return new Response(null, { status: 304, headers })
+    return notModifiedResponse(headers)
   if (request.method === 'HEAD')
     return new Response(null, { status: 200, headers })
 
-  if (file.length === 0)
-    return new Response(new Uint8Array(), { status: 200, headers })
-  const object = await bucket.get(alias.bundle.packKey, {
-    range: { offset: file.offset, length: file.length },
-  })
-  if (!object)
-    throw new RemoteThemeError(503, 'theme_cache_incomplete', 'Cached theme data is missing')
-  return new Response(object.body, { status: 200, headers })
+  const bytes = await readPackedFileBytes(bucket, alias, file)
+  const body = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
+  return new Response(body, { status: 200, headers })
 }
 
 export async function handleRemoteTheme(
@@ -710,6 +866,16 @@ export async function handleRemoteTheme(
   const url = new URL(request.url)
   const baseUrl = `${url.origin}${route.basePath}`
   if (!route.filePath) {
+    if (route.channel === 'release') {
+      return jsonResponse({
+        status: 'ok',
+        repository: route.repository,
+        channel: 'release',
+        asset_id: route.assetId,
+        asset_url: baseUrl,
+        immutable: true,
+      })
+    }
     return jsonResponse({
       status: 'ok',
       repository: route.repository,
@@ -725,10 +891,19 @@ export async function handleRemoteTheme(
     now: dependencies.now ?? Date.now,
   }
   try {
-    const alias = await resolveBundle(route, env, resolvedDependencies, url.origin)
-    const index = await readBundleIndex(env.THEME_CACHE!, alias.bundle.indexKey)
-    if (!index)
-      throw new RemoteThemeError(503, 'theme_cache_incomplete', 'Cached theme index is missing')
+    let alias: BundleAlias
+    let index: BundleIndex | null
+    if (route.channel === 'latest') {
+      alias = await resolveBundle(route, env, resolvedDependencies, url.origin)
+      index = await readBundleIndex(env.THEME_CACHE!, alias.bundle.indexKey)
+      if (!index)
+        throw new RemoteThemeError(503, 'theme_cache_incomplete', 'Cached theme index is missing')
+    }
+    else {
+      const pinned = await resolvePinnedBundle(route, env, resolvedDependencies.now())
+      alias = pinned.alias
+      index = pinned.index
+    }
     return await servePackedFile(request, route, env, alias, index)
   }
   catch (error) {

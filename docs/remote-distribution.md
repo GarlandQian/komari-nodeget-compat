@@ -16,6 +16,14 @@ https://adapter.example/themes/github/sanrokamlan-prog/komari-theme-Glassmorphis
 
 NodeGet 会在该基址后请求 `nodeget-theme.json`、`nodeget-theme-files.json` 和清单中的每个文件。不要把 GitHub ZIP 下载地址直接填入 NodeGet。
 
+Worker 返回的是轻量安装清单。NodeGet 只下载入口 HTML、兼容运行时、配置、预览等少量文件；原主题的构建资源由入口引用下面的内部固定版本地址：
+
+```text
+https://<WORKER_DOMAIN>/themes/github/<OWNER>/<REPOSITORY>/releases/<ASSET_ID>/v1/...
+```
+
+这个固定地址由 Worker 自动生成，不需要手动导入 NodeGet。它避免 NodeGet 串行拉取几百个主题文件，也保证旧安装不会在 `latest` 指向新 Release 后丢失旧资源。末尾的 `v1` 是资源改写协议版本；未来改变改写规则时应增加新版本并继续保留旧版本，不能就地改变 `immutable` URL 的内容语义。
+
 ## Release 选择
 
 Worker 调用 GitHub `releases/latest` 获取最新正式 Release。GitHub 自动生成的 Source code ZIP 不属于 Release assets，不会被选中。
@@ -34,7 +42,8 @@ Worker 调用 GitHub `releases/latest` 获取最新正式 Release。GitHub 自�
 1. 检查仓库是否位于 `ALLOWED_GITHUB_REPOSITORIES`。
 2. 解析 GitHub 最新 Release 并下载 ZIP。
 3. 转换主题，将文件合并成一个连续 R2 数据包和一个索引。
-4. 按文件偏移使用 R2 Range 响应 NodeGet 请求。
+4. 为 NodeGet 生成少量本地安装文件，并把源主题静态资源改写到固定 Release 地址。
+5. 按文件偏移使用 R2 Range 响应 NodeGet 和浏览器请求。
 
 最新 Release 默认每 300 秒重新检查一次，可用 `RELEASE_CHECK_TTL_SECONDS` 调整到 60 至 86400 秒。GitHub 临时不可用时，如果 R2 已有缓存，会继续提供上一次成功版本。
 
@@ -52,9 +61,11 @@ ALLOWED_GITHUB_REPOSITORIES=owner/theme-one,owner/theme-two
 
 ## 更新行为
 
-NodeGet 远程导入会把文件复制进本地主题桶。转换后的 `nodeget-theme.json` 会记录稳定 Worker 地址为 `dist_page`，因此上游更新后可以在主题管理中点击“从远程更新”。
+NodeGet 远程导入会把轻量清单中的文件复制进本地主题桶。转换后的 `nodeget-theme.json` 会记录稳定 Worker 地址为 `dist_page`，因此上游更新后可以在主题管理中点击“从远程更新”。更新后的入口会指向新 Release ID，未更新的安装仍指向旧 Release ID。
 
 NodeGet 当前不会定时检查或静默覆盖已安装主题。兼容层也不持有 NodeGet 管理 Token，因此不会主动修改主题桶。
+
+远程安装后的源主题 JS、CSS、图片和字体依赖 Worker 与 R2 保持可访问。需要安装后完全离线或不依赖 Worker 时，在转换器中上传 Release ZIP 并使用生成的完整 NodeGet ZIP。
 
 ## 运行限制
 

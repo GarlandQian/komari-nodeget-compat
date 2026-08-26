@@ -34,6 +34,22 @@ NodeGet 当前版本可使用下面的 `token_limit`。它允许列出节点并�
 
 不要授予 `Task::Create/Write/Delete`、KV 写入/删除、Terminal、Crontab 写入、配置读写、执行命令、WebShell、HTTP Request、自更新、JS Worker 或数据库权限。
 
+## 在 NodeGet 中配置
+
+转换包的 `config.json` 会故意保留空的 `site_tokens`，不要在转换器、GitHub 或 Cloudflare 中配置真实 Token。导入后打开：
+
+```text
+主题管理 -> 对应主题 -> Token 授权
+```
+
+优先点击 NodeGet 已生成的“本机 纯监控”或“本机 监控+ping”预设，再点击“确定”。本地上传不会自动选择预设；没有授权配置时主题可以显示界面，但不会读取服务器和节点信息。
+
+手动配置时可直接填写 NodeGet 面板使用的后端地址。兼容运行时接受以下形式，并会在需要时转换协议、补全 `/nodeget/rpc`：
+
+- `https://nodeget.example`
+- `wss://nodeget.example`
+- `wss://nodeget.example/nodeget/rpc`
+
 站点配置示例：
 
 ```json
@@ -41,11 +57,11 @@ NodeGet 当前版本可使用下面的 `token_limit`。它允许列出节点并�
   "site_tokens": [
     {
       "name": "公开状态页",
-      "backend_url": "wss://nodeget.example/nodeget/rpc",
+      "backend_url": "https://nodeget.example",
       "token": "TOKEN_KEY:TOKEN_SECRET"
     }
   ]
 }
 ```
 
-多站点时为每个 NodeGet 后端分别创建最小只读 Token，并各自增加一项。真实 Token 不应提交到仓库。
+多站点时为每个 NodeGet 后端分别创建最小只读 Token，并各自增加一项。真实 Token 不应提交到仓库。保存后刷新主题页面；仍无数据时，先在浏览器开发者工具中检查 WebSocket 是否连接到 `wss://<域名>/nodeget/rpc`，再核对 Token 权限。

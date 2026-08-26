@@ -38,4 +38,14 @@ describe('runtime config', () => {
     )
     expect(loaded.config.site_tokens?.[0]?.token).toBe('read-only-token')
   })
+
+  it('accepts the backend origin format saved by the NodeGet theme panel', async () => {
+    const loaded = await loadRuntimeConfig(
+      fixtureFetch({
+        site_tokens: [{ backend_url: 'https://nodeget.example', token: 'read-only-token' }],
+      }),
+      new URL('https://theme.example/'),
+    )
+    expect(loaded.config.site_tokens?.[0]?.backend_url).toBe('https://nodeget.example')
+  })
 })
