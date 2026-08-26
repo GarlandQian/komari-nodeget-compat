@@ -48,7 +48,7 @@ NodeGet 当前会把主题配置提供给访问者浏览器，因此公开主题
 https://<WORKER_DOMAIN>/themes/github/<OWNER>/<REPOSITORY>/latest
 ```
 
-把该地址填入 NodeGet 主题管理的“从远程导入”，或使用转换器页面生成的“在 NodeGet 导入”链接。首次访问时 Worker 会解析 GitHub 最新 Release、转换唯一或最匹配的 ZIP 资源并写入 R2；后续文件直接从 R2 Range 读取。
+把该地址填入 NodeGet 主题管理的“从远程导入”，或使用转换器页面生成的“在 NodeGet 导入”链接。导入按钮默认打开官方 `https://dash.nodeget.com`；可以用 `NODEGET_DASHBOARD_URL` 部署变量改为自己的 NodeGet 面板。首次访问时 Worker 会解析 GitHub 最新 Release、转换唯一或最匹配的 ZIP 资源并写入 R2；后续文件直接从 R2 Range 读取。GitHub 公共 API 遇到限流时，Worker 会回退到同仓库的公开 Release 页面，不要求为公开主题配置 GitHub Token。
 
 为避免 NodeGet 串行下载数百个文件导致导入长时间无响应，远程清单只让 NodeGet 保存入口、兼容运行时、配置和预览等少量文件；原主题的 JS、CSS、图片和字体继续从 Worker 的固定 Release 地址加载。固定地址不会随 `latest` 改变，所以已安装版本不会被后续发布破坏。远程安装后的主题需要 Worker 保持可访问；需要完全独立于 Worker 时使用本地 ZIP 转换模式。
 
@@ -83,7 +83,7 @@ bunx wrangler r2 bucket create komari-nodeget-theme-cache
 bun run deploy
 ```
 
-项目使用 Workers Static Assets 和私有 R2 绑定。部署目录为 `dist/web`；`/api/config` 只返回公开功能开关和仓库白名单，`/api/health` 返回运行状态。远程路由只允许读取配置白名单中的公开 GitHub Release；ACG 接口只访问代码中固定的夜轻 API 域名，不存在任意 URL 或 NodeGet 代理接口。
+项目使用 Workers Static Assets 和私有 R2 绑定。部署目录为 `dist/web`；`/api/config` 只返回公开功能开关、NodeGet 面板地址和仓库白名单，`/api/health` 返回运行状态。远程路由只允许读取配置白名单中的公开 GitHub Release；ACG 接口只访问代码中固定的夜轻 API 域名，不存在任意 URL 或 NodeGet 代理接口。
 
 ### GitHub Actions
 
@@ -112,6 +112,7 @@ bun run deploy
 
 - `ACG_BACKGROUND_ENABLED`：设为 `true` 时启用 ACG 背景；未配置或其他值均按 `false` 部署。
 - `ALLOWED_GITHUB_REPOSITORIES`：允许远程转换的公开仓库，使用不带空格的逗号分隔 `owner/repo` 列表；未配置时关闭远程分发。
+- `NODEGET_DASHBOARD_URL`：“在 NodeGet 导入”按钮打开的面板根地址；未配置、不是 HTTP(S) URL 或包含账号密码时使用官方 `https://dash.nodeget.com`。
 - `RELEASE_CHECK_TTL_SECONDS`：检查 GitHub 最新 Release 的间隔，允许 60–86400 秒，默认 300 秒。
 
 部署 workflow 会幂等创建 `komari-nodeget-theme-cache` R2 桶。Pull Request 和非 `main` 分支由 `CI` workflow 执行类型检查、测试、构建及 Wrangler dry run，不部署。

@@ -1,4 +1,5 @@
 # Optional. The open-source default is disabled.
 ACG_BACKGROUND_ENABLED=false
 ALLOWED_GITHUB_REPOSITORIES=sanrokamlan-prog/komari-theme-Glassmorphism
+NODEGET_DASHBOARD_URL=https://dash.nodeget.com
 RELEASE_CHECK_TTL_SECONDS=300

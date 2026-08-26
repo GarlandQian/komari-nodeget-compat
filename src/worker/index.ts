@@ -1,7 +1,7 @@
 import type { RemoteThemeEnvironment } from './remote-theme'
 import { environmentFlagEnabled } from '../shared/utils'
 import { handleAcgBackground } from './acg-background'
-import { allowedGitHubRepositories, handleRemoteTheme } from './remote-theme'
+import { allowedGitHubRepositories, handleRemoteTheme, nodeGetDashboardUrl } from './remote-theme'
 
 interface Environment extends RemoteThemeEnvironment {
   ACG_BACKGROUND_ENABLED?: string
@@ -33,6 +33,7 @@ export default {
     if (request.method === 'GET' && url.pathname === '/api/config') {
       return json({
         acg_background_enabled: environmentFlagEnabled(env.ACG_BACKGROUND_ENABLED),
+        nodeget_dashboard_url: nodeGetDashboardUrl(env.NODEGET_DASHBOARD_URL),
         remote_theme_enabled: repositories.length > 0,
         remote_theme_repositories: repositories,
       })
@@ -40,7 +41,7 @@ export default {
     if (request.method === 'GET' && url.pathname === '/api/health') {
       return json({
         status: 'ok',
-        version: '0.3.1',
+        version: '0.3.2',
         conversion: 'browser-local',
         remote_distribution: env.THEME_CACHE ? 'r2' : 'unavailable',
         remote_theme_repositories: repositories.length,
