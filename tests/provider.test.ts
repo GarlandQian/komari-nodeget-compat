@@ -63,7 +63,7 @@ describe('NodeGetMonitorProvider', () => {
     expect(info.theme_settings).not.toHaveProperty('metric_retention_days')
   })
 
-  it('automatically binds LuminaPlus nodes to real homepage Ping tasks', async () => {
+  it('automatically exposes real homepage Ping bindings for themes without explicit bindings', async () => {
     const uuid = '77777777-7777-4777-8777-777777777777'
     const caller: NodeGetCaller = {
       async call<T>(method: string, params?: Record<string, unknown>): Promise<T> {
@@ -72,7 +72,7 @@ describe('NodeGetMonitorProvider', () => {
         if (method === 'agent_static_data_multi_last_query')
           return [] as T
         if (method === 'kv_get_multi_value')
-          return [{ namespace: uuid, key: 'metadata_name', value: 'Lumina node' }] as T
+          return [{ namespace: uuid, key: 'metadata_name', value: 'Generic node' }] as T
         if (method === 'agent_dynamic_summary_multi_last_query')
           return [{ uuid, timestamp: Date.now(), total_memory: 1_000, total_space: 2_000 }] as T
         if (method === 'task_query') {
@@ -94,25 +94,19 @@ describe('NodeGetMonitorProvider', () => {
     }
     const provider = new NodeGetMonitorProvider({
       site_tokens: [{ name: 'Only', backend_url: 'https://only.example', token: 'token' }],
-    }, {
-      ...manifest,
-      source: { name: 'Komari-Theme-LuminaPlus', short: 'LuminaPlus', version: '1.2.9' },
-    }, () => caller)
+    }, manifest, () => caller)
 
     const info = await provider.getPublicInfo()
     const bindings = info.theme_settings.homepagePingBindings as Record<string, string[]>
     expect(Object.values(bindings)).toEqual([[uuid]])
   })
 
-  it('preserves explicit LuminaPlus Ping bindings without requiring Ping permission', async () => {
+  it('preserves explicit homepage Ping bindings without requiring Ping permission', async () => {
     const configured = { 42: ['saved-node'] }
     const provider = new NodeGetMonitorProvider({
       user_preferences: { homepagePingBindings: configured },
       site_tokens: [],
-    }, {
-      ...manifest,
-      source: { name: 'Komari-Theme-LuminaPlus', short: 'LuminaPlus', version: '1.2.9' },
-    })
+    }, manifest)
 
     const info = await provider.getPublicInfo()
     expect(info.theme_settings.homepagePingBindings).toEqual(configured)
