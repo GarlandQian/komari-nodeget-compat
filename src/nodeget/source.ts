@@ -56,9 +56,6 @@ const MAX_HISTORY_RANGE_MS = 30 * 24 * 3_600_000
 const TRAFFIC_PREDECESSOR_LOOKBACK_MS = 2 * 3_600_000
 const TRAFFIC_EXTENSION_BILLING_MODES = new Set(['quota', 'payg'])
 const TRAFFIC_EXTENSION_PERIODS = new Set(['hourly', 'daily', 'weekly', 'monthly', 'never'])
-const TRAFFIC_PERIOD_CACHE_TTL_MS = 60_000
-const TRAFFIC_PERIOD_RETRY_MS = 15_000
-const PING_TASK_DISCOVERY_WINDOW_MS = 6 * 3_600_000
 const TRAFFIC_LIMIT_TYPES = new Set(['sum', 'max', 'min', 'up', 'down'])
 const METRIC_AGGREGATIONS = new Set([
   'avg',
@@ -95,18 +92,6 @@ const METADATA_KEYS = [
   'metadata_traffic_limit_type',
   'metadata_billing_mode',
   'metadata_traffic_period',
-  'metadata_traffic_period_start',
-  'metadata_traffic_period_base',
-  'metadata_traffic_used',
-] as const
-
-const TRAFFIC_PERIOD_METADATA_KEYS = [
-  'metadata_billing_mode',
-  'metadata_traffic_limit',
-  'metadata_traffic_period',
-  'metadata_traffic_period_start',
-  'metadata_traffic_period_base',
-  'metadata_traffic_used',
 ] as const
 
 const METRIC_DEFINITIONS: MetricDefinition[] = [
@@ -151,13 +136,6 @@ interface RawTrafficState {
   timestamp: number
   up: number
   uptime: number
-}
-
-interface TrafficPeriodState {
-  base: number
-  enabled: boolean
-  start: number
-  used: number
 }
 
 type MetricAggregation = 'avg' | 'min' | 'max' | 'sum' | 'count' | 'p50' | 'p95' | 'p99'
@@ -320,21 +298,6 @@ function trafficLimitMetadata(kv: Record<string, unknown>): {
   }
 }
 
-function trafficPeriodMetadata(kv: Record<string, unknown>): TrafficPeriodState {
-  const billingMode = stringValue(parseJsonValue(kv.metadata_billing_mode, '')).toLowerCase()
-  const period = stringValue(parseJsonValue(kv.metadata_traffic_period, '')).toLowerCase()
-  const rawLimit = finiteNumber(parseJsonValue(kv.metadata_traffic_limit, 0))
-  return {
-    enabled: billingMode === 'quota'
-      && period !== 'never'
-      && TRAFFIC_EXTENSION_PERIODS.has(period)
-      && rawLimit > 0,
-    start: Math.max(0, timestampMs(parseJsonValue(kv.metadata_traffic_period_start, 0))),
-    base: Math.max(0, finiteNumber(parseJsonValue(kv.metadata_traffic_period_base, 0))),
-    used: Math.max(0, finiteNumber(parseJsonValue(kv.metadata_traffic_used, 0))),
-  }
-}
-
 function rawTrafficState(dynamic: Record<string, unknown>): RawTrafficState {
   return {
     timestamp: timestampMs(dynamic.timestamp ?? dynamic.storage_time),
@@ -350,31 +313,6 @@ function trafficDelta(current: RawTrafficState, previous: RawTrafficState | unde
   const currentValue = current[direction]
   const previousValue = previous[direction]
   return currentValue >= previousValue ? currentValue - previousValue : 0
-}
-
-function currentPeriodTraffic(
-  rawUp: number,
-  rawDown: number,
-  period: TrafficPeriodState | undefined,
-): { up: number, down: number } {
-  if (!period?.enabled)
-    return { up: rawUp, down: rawDown }
-
-  // The extension quota can be configured before its reset worker initializes
-  // the current-period baseline. Preserve NodeGet's real counters until then.
-  if (period.start <= 0 && period.used <= 0)
-    return { up: rawUp, down: rawDown }
-
-  const total = rawUp + rawDown
-  const used = Math.max(
-    period.used,
-    period.start > 0 && total >= period.base ? total - period.base : 0,
-  )
-  if (used <= 0 || total <= 0)
-    return { up: 0, down: Math.max(0, used) }
-
-  const up = Math.round(used * rawUp / total)
-  return { up, down: Math.max(0, used - up) }
 }
 
 function recordFromStatus(status: KomariNodeStatus): KomariStatusRecord {
@@ -655,9 +593,6 @@ export class NodeGetSource {
   private clientCache: Record<string, KomariClient> = {}
   private statusCache: Record<string, KomariNodeStatus> = {}
   private latestRawTrafficCache: Record<string, RawTrafficState> = {}
-  private trafficPeriodCache: Record<string, TrafficPeriodState> = {}
-  private trafficPeriodExpiresAt = 0
-  private trafficPeriodRefreshPromise: Promise<void> | null = null
   private pingTaskCache: { expiresAt: number, tasks: KomariPingTask[] } | null = null
 
   constructor(
@@ -687,7 +622,6 @@ export class NodeGetSource {
     const kvByNamespace = kvPayloadByNamespace(kvPayload)
 
     const clients: Record<string, KomariClient> = {}
-    const trafficPeriods: Record<string, TrafficPeriodState> = {}
     for (const uuid of uuids) {
       const kv = kvByNamespace[uuid] ?? {}
       const staticData = statics[uuid] ?? {}
@@ -700,7 +634,6 @@ export class NodeGetSource {
       const expireTime = stringValue(parseJsonValue(kv.metadata_expire_time, ''))
       const physicalCores = finiteNumber(cpu.physical_cores)
       const traffic = trafficLimitMetadata(kv)
-      trafficPeriods[uuid] = trafficPeriodMetadata(kv)
 
       clients[uuid] = {
         uuid,
@@ -742,8 +675,6 @@ export class NodeGetSource {
     }
 
     this.clientCache = clients
-    this.trafficPeriodCache = trafficPeriods
-    this.trafficPeriodExpiresAt = Date.now() + TRAFFIC_PERIOD_CACHE_TTL_MS
     const statuses = await this.getLatestStatuses(uuids).catch(() => ({}))
     for (const [uuid, status] of Object.entries(statuses)) {
       const client = clients[uuid]
@@ -767,8 +698,6 @@ export class NodeGetSource {
     if (!ids.length)
       return {}
 
-    await this.refreshTrafficPeriodsIfNeeded(ids).catch(() => {})
-
     const payload = await this.rpc.call<unknown>('agent_dynamic_summary_multi_last_query', {
       uuids: ids,
       fields: DYNAMIC_FIELDS,
@@ -784,7 +713,7 @@ export class NodeGetSource {
       }
       const currentRow = row ?? {}
       const rawTraffic = rawTrafficState(currentRow)
-      statuses[uuid] = this.toStatus(uuid, currentRow, now, this.latestRawTrafficCache[uuid], true)
+      statuses[uuid] = this.toStatus(uuid, currentRow, now, this.latestRawTrafficCache[uuid])
       if (rawTraffic.timestamp > 0)
         this.latestRawTrafficCache[uuid] = rawTraffic
     }
@@ -861,8 +790,8 @@ export class NodeGetSource {
   async getPingTasks(): Promise<KomariPingTask[]> {
     if (this.pingTaskCache && this.pingTaskCache.expiresAt > Date.now())
       return this.pingTaskCache.tasks
+    const start = 0
     const end = Date.now()
-    const start = end - 24 * 3_600_000
     const uuids = Object.keys(this.clientCache).length
       ? Object.keys(this.clientCache)
       : await this.listAgentUuids()
@@ -870,7 +799,7 @@ export class NodeGetSource {
     let globalQuerySucceeded = false
     let globalFailure: unknown
     try {
-      rows = await this.queryTaskRows(undefined, start, end, PING_TASK_DISCOVERY_WINDOW_MS)
+      rows = await this.queryTaskRows(undefined, start, end, end)
       globalQuerySucceeded = true
     }
     catch (error) {
@@ -1105,50 +1034,11 @@ export class NodeGetSource {
       .sort()
   }
 
-  private async refreshTrafficPeriodsIfNeeded(requestedIds: string[]): Promise<void> {
-    if (this.trafficPeriodExpiresAt > Date.now())
-      return
-    if (!this.trafficPeriodRefreshPromise) {
-      const cachedIds = Object.keys(this.clientCache)
-      const ids = [...new Set((cachedIds.length ? cachedIds : requestedIds).filter(Boolean))]
-      this.trafficPeriodRefreshPromise = this.loadTrafficPeriods(ids)
-        .then((periods) => {
-          const merged = { ...this.trafficPeriodCache }
-          for (const [uuid, period] of Object.entries(periods)) {
-            const previous = merged[uuid]
-            merged[uuid] = previous?.enabled && period.enabled && previous.start === period.start
-              ? { ...period, used: Math.max(previous.used, period.used) }
-              : period
-          }
-          this.trafficPeriodCache = merged
-          this.trafficPeriodExpiresAt = Date.now() + TRAFFIC_PERIOD_CACHE_TTL_MS
-        })
-        .catch((error) => {
-          this.trafficPeriodExpiresAt = Date.now() + TRAFFIC_PERIOD_RETRY_MS
-          throw error
-        })
-        .finally(() => {
-          this.trafficPeriodRefreshPromise = null
-        })
-    }
-    await this.trafficPeriodRefreshPromise
-  }
-
-  private async loadTrafficPeriods(uuids: string[]): Promise<Record<string, TrafficPeriodState>> {
-    if (!uuids.length)
-      return {}
-    const namespaceKeys = uuids.flatMap(uuid => TRAFFIC_PERIOD_METADATA_KEYS.map(key => ({ namespace: uuid, key })))
-    const payload = await this.rpc.call<unknown>('kv_get_multi_value', { namespace_key: namespaceKeys })
-    const kvByNamespace = kvPayloadByNamespace(payload)
-    return Object.fromEntries(uuids.map(uuid => [uuid, trafficPeriodMetadata(kvByNamespace[uuid] ?? {})]))
-  }
-
   private toStatus(
     uuid: string,
     dynamic: Record<string, unknown>,
     now: number,
     previousTraffic?: RawTrafficState,
-    applyTrafficPeriod = false,
   ): KomariNodeStatus {
     const timestamp = timestampMs(dynamic.timestamp ?? dynamic.storage_time)
     const ramTotal = firstFiniteValue(dynamic, ['total_memory'])
@@ -1159,9 +1049,6 @@ export class NodeGetSource {
     const rawTraffic = rawTrafficState(dynamic)
     const tcpConnections = Math.max(0, firstFiniteValue(dynamic, ['tcp_connections']))
     const udpConnections = Math.max(0, firstFiniteValue(dynamic, ['udp_connections']))
-    const totals = applyTrafficPeriod
-      ? currentPeriodTraffic(rawTraffic.up, rawTraffic.down, this.trafficPeriodCache[uuid])
-      : { up: rawTraffic.up, down: rawTraffic.down }
 
     return {
       client: uuid,
@@ -1180,8 +1067,8 @@ export class NodeGetSource {
       disk_total: diskTotal,
       net_in: firstFiniteValue(dynamic, ['receive_speed']),
       net_out: firstFiniteValue(dynamic, ['transmit_speed']),
-      net_total_up: totals.up,
-      net_total_down: totals.down,
+      net_total_up: rawTraffic.up,
+      net_total_down: rawTraffic.down,
       traffic_up: trafficDelta(rawTraffic, previousTraffic, 'up'),
       traffic_down: trafficDelta(rawTraffic, previousTraffic, 'down'),
       process: firstFiniteValue(dynamic, ['process_count']),
@@ -1269,7 +1156,7 @@ export class NodeGetSource {
         const condition: Record<string, unknown>[] = []
         if (uuid)
           condition.push({ uuid })
-        condition.push({ type }, { timestamp_from: from }, { timestamp_to: to }, { limit: 10_000 })
+        condition.push({ type }, { timestamp_from_to: [from, to] }, { limit: 10_000 })
         return this.rpc.call<unknown>('task_query', { task_data_query: { condition } })
           .then(response => ({ requestedType: type, response }))
       }))

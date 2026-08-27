@@ -143,11 +143,14 @@ describe('NodeGetSource', () => {
     })
   })
 
-  it('keeps real cumulative traffic until the extension initializes its current-period baseline', async () => {
+  it('keeps raw cumulative traffic before the extension period worker initializes', async () => {
     const caller = new FixtureCaller(false, {
       metadata_billing_mode: 'quota',
       metadata_traffic_limit: 10,
       metadata_traffic_period: 'monthly',
+      metadata_traffic_period_start: 0,
+      metadata_traffic_period_base: 0,
+      metadata_traffic_used: 0,
     }, [], {
       timestamp: Date.now() - 1_000,
       uptime: 1_000,
@@ -215,7 +218,7 @@ describe('NodeGetSource', () => {
     expect(clients[TEST_UUID]?.traffic_limit_type).toBe('sum')
   })
 
-  it('maps extension traffic usage to the current quota period only', async () => {
+  it('keeps extension traffic counters cumulative after the period worker initializes', async () => {
     const timestamp = Date.parse('2026-08-25T12:00:00.000Z')
     const caller = new FixtureCaller(false, {
       metadata_billing_mode: 'quota',
@@ -234,7 +237,8 @@ describe('NodeGetSource', () => {
     await source.getClients()
 
     const first = await source.getLatestStatuses([TEST_UUID])
-    expect(first[TEST_UUID]!.net_total_up + first[TEST_UUID]!.net_total_down).toBe(500)
+    expect(first[TEST_UUID]!.net_total_up).toBe(1_000)
+    expect(first[TEST_UUID]!.net_total_down).toBe(1_000)
     expect(first[TEST_UUID]!.traffic_up).toBe(0)
     expect(first[TEST_UUID]!.traffic_down).toBe(0)
 
@@ -245,12 +249,13 @@ describe('NodeGetSource', () => {
       total_received: 1_200,
     })
     const second = await source.getLatestStatuses([TEST_UUID])
-    expect(second[TEST_UUID]!.net_total_up + second[TEST_UUID]!.net_total_down).toBe(800)
+    expect(second[TEST_UUID]!.net_total_up).toBe(1_100)
+    expect(second[TEST_UUID]!.net_total_down).toBe(1_200)
     expect(second[TEST_UUID]!.traffic_up).toBe(100)
     expect(second[TEST_UUID]!.traffic_down).toBe(200)
   })
 
-  it('refreshes extension period metadata during realtime status polling', async () => {
+  it('does not poll private period-worker metadata during realtime status updates', async () => {
     const timestamp = Date.parse('2026-08-25T12:00:00.000Z')
     const metadata: Record<string, unknown> = {
       metadata_billing_mode: 'quota',
@@ -269,19 +274,13 @@ describe('NodeGetSource', () => {
     const source = new NodeGetSource('Fixture', 'wss://nodeget.example/nodeget/rpc', caller)
     await source.getClients()
 
-    Object.assign(metadata, {
-      metadata_traffic_period_start: timestamp,
-      metadata_traffic_period_base: 1_900,
-      metadata_traffic_used: 100,
-    })
-    ;(source as unknown as { trafficPeriodExpiresAt: number }).trafficPeriodExpiresAt = Date.now() - 1
     const statuses = await source.getLatestStatuses([TEST_UUID])
 
-    expect(statuses[TEST_UUID]!.net_total_up + statuses[TEST_UUID]!.net_total_down).toBe(100)
-    expect(caller.calls.filter(call => call.method === 'kv_get_multi_value')).toHaveLength(2)
+    expect(statuses[TEST_UUID]!.net_total_up + statuses[TEST_UUID]!.net_total_down).toBe(2_000)
+    expect(caller.calls.filter(call => call.method === 'kv_get_multi_value')).toHaveLength(1)
   })
 
-  it('does not let current-period traffic fall below extension usage after a counter reset', async () => {
+  it('uses reset agent counters instead of private period-worker usage', async () => {
     const timestamp = Date.parse('2026-08-25T12:00:00.000Z')
     const metadata: Record<string, unknown> = {
       metadata_billing_mode: 'quota',
@@ -293,17 +292,24 @@ describe('NodeGetSource', () => {
     }
     const caller = new FixtureCaller(false, metadata, [], {
       timestamp,
+      uptime: 1_000,
+      total_transmitted: 4_000,
+      total_received: 6_000,
+    })
+    const source = new NodeGetSource('Fixture', 'wss://nodeget.example/nodeget/rpc', caller)
+    await source.getClients()
+    Object.assign(caller.latestDynamic, {
+      timestamp: timestamp + 10_000,
       uptime: 10,
       total_transmitted: 100,
       total_received: 200,
     })
-    const source = new NodeGetSource('Fixture', 'wss://nodeget.example/nodeget/rpc', caller)
-    await source.getClients()
-    metadata.metadata_traffic_used = 0
-    ;(source as unknown as { trafficPeriodExpiresAt: number }).trafficPeriodExpiresAt = Date.now() - 1
     const statuses = await source.getLatestStatuses([TEST_UUID])
 
-    expect(statuses[TEST_UUID]!.net_total_up + statuses[TEST_UUID]!.net_total_down).toBe(800)
+    expect(statuses[TEST_UUID]!.net_total_up).toBe(100)
+    expect(statuses[TEST_UUID]!.net_total_down).toBe(200)
+    expect(statuses[TEST_UUID]!.traffic_up).toBe(0)
+    expect(statuses[TEST_UUID]!.traffic_down).toBe(0)
   })
 
   it('computes reset-aware traffic deltas and honors per-metric aggregation', async () => {

@@ -63,7 +63,7 @@ describe('NodeGetMonitorProvider', () => {
     expect(info.theme_settings).not.toHaveProperty('metric_retention_days')
   })
 
-  it('automatically exposes real homepage Ping bindings from scoped task queries when bindings are empty', async () => {
+  it('automatically exposes stored homepage Ping bindings from scoped task queries when bindings are empty', async () => {
     const uuid = '77777777-7777-4777-8777-777777777777'
     const caller: NodeGetCaller = {
       async call<T>(method: string, params?: Record<string, unknown>): Promise<T> {
@@ -83,7 +83,7 @@ describe('NodeGetMonitorProvider', () => {
           return (type === 'ping'
             ? [{
                 uuid,
-                timestamp: Date.now() - 1_000,
+                timestamp: Date.now() - 48 * 3_600_000,
                 success: true,
                 cron_source: 'Homepage Ping',
                 task_event_result: { ping: 18 },
