@@ -14,9 +14,10 @@
 - 将 GitHub 最新 Release 映射为稳定的 NodeGet 主题站点 URL，并使用 R2 缓存。
 - 支持多个 NodeGet 站点，并为跨站点节点生成无冲突 ID。
 - 自动识别 NodeGet `extension-traffic` 的节点配置，仅在识别后把扩展保存的 GB 流量额度换算为 Komari 使用的字节。
+- 按 Komari 语义映射实时累计流量、逐采样流量增量、Metric Store 分桶聚合及 Ping/TCPing 数据。
 - 拒绝管理员、登录、终端及写操作，不把它们透传到 NodeGet。
 
-完整协议范围见 [docs/protocol-scope.md](docs/protocol-scope.md)。
+完整协议范围见 [docs/protocol-scope.md](docs/protocol-scope.md)，当前真实 Release 验证结果见 [docs/theme-compatibility.md](docs/theme-compatibility.md)。
 
 ## Token 配置
 
@@ -36,7 +37,9 @@
 
 适配层支持 [`extension-traffic`](https://github.com/34892002/nodeget/tree/main/extension-traffic) 的流量额度配置。扩展把 `metadata_traffic_limit` 保存为 GB，而 Komari 主题把 `traffic_limit` 当作字节；适配层会按每个节点的 `metadata_billing_mode` / `metadata_traffic_period` 配置签名自动识别，并使用 `1 GB = 1024³ B` 转换。
 
-只有在扩展已为该节点保存有效配置时才会转换。仅安装扩展但未配置节点不会触发；没有扩展签名的自定义 `metadata_traffic_limit` 仍按字节处理，避免改变其他 NodeGet 元数据方案。扩展的按量计费模式没有对应的 Komari 公共主题额度字段，因此不会伪装成固定额度。
+只有在扩展同时保存有效 `metadata_billing_mode` 和 `metadata_traffic_period` 时才会转换。仅安装扩展但未配置节点不会触发；没有完整扩展签名的自定义 `metadata_traffic_limit` 即使带周期字段也仍按字节处理，避免改变其他 NodeGet 元数据方案。扩展的按量计费模式没有对应的 Komari 公共主题额度字段，因此不会伪装成固定额度。
+
+配额模式下，主题的“总流量”使用扩展当前计费周期的总用量，而不是 Agent 启动以来的累计字节。适配层每分钟刷新周期起点、基准和已用量；由于扩展只保存上下行合计，主题中的上下行拆分按 Agent 原始累计流量比例估算，但两者之和严格等于当前周期用量。
 
 NodeGet 当前会把主题配置提供给访问者浏览器，因此公开主题 Token 仍然可见，必须使用最小只读权限。参考 [docs/nodeget-minimal-token.md](docs/nodeget-minimal-token.md)。
 
@@ -49,6 +52,8 @@ https://<WORKER_DOMAIN>/themes/github/<OWNER>/<REPOSITORY>/latest
 ```
 
 把该地址填入 NodeGet 主题管理的“从远程导入”，或使用转换器页面生成的“在 NodeGet 导入”链接。导入按钮默认打开官方 `https://dash.nodeget.com`；可以用 `NODEGET_DASHBOARD_URL` 部署变量改为自己的 NodeGet 面板。首次访问时 Worker 会解析 GitHub 最新 Release、转换唯一或最匹配的 ZIP 资源并写入 R2；后续文件直接从 R2 Range 读取。GitHub 公共 API 遇到限流时，Worker 会回退到同仓库的公开 Release 页面，不要求为公开主题配置 GitHub Token。
+
+部署 workflow 会在 Worker 发布后遍历 `ALLOWED_GITHUB_REPOSITORIES`，预先转换每个主题并验证清单、预览、运行时、ACG 配置及一个固定 Release 资源。因此部署成功后对应数据包已经进入 R2；新增仓库只需修改白名单变量并重新运行 workflow，不需要为每个主题改代码。
 
 为避免 NodeGet 串行下载数百个文件导致导入长时间无响应，远程清单只让 NodeGet 保存入口、兼容运行时、配置和预览等少量文件；原主题的 JS、CSS、图片和字体继续从 Worker 的固定 Release 地址加载。固定地址不会随 `latest` 改变，所以已安装版本不会被后续发布破坏。远程安装后的主题需要 Worker 保持可访问；需要完全独立于 Worker 时使用本地 ZIP 转换模式。
 
@@ -87,7 +92,7 @@ bun run deploy
 
 ### GitHub Actions
 
-推送到 `main` 或手动运行 `Deploy Cloudflare Worker` workflow 会执行完整检查并部署。需要在 GitHub 仓库的 Actions secrets 或 `production` environment 中配置：
+推送到 `main` 或手动运行 `Deploy Cloudflare Worker` workflow 会执行完整检查、部署并预热验证所有白名单主题。需要在 GitHub 仓库的 Actions secrets 或 `production` environment 中配置：
 
 - `CLOUDFLARE_API_TOKEN`：按下方最小权限创建的 Cloudflare API Token。
 - `CLOUDFLARE_ACCOUNT_ID`：目标 Cloudflare Account ID。
@@ -129,7 +134,7 @@ ACG_BACKGROUND_ENABLED=true
 
 本地调试时可以复制 `.dev.vars.example` 为 `.dev.vars` 并修改值；`.dev.vars` 已被 Git 忽略。
 
-背景来自 [夜轻随机二次元图片 API](https://blog.yeqing.net/acg-api/)。开启后，Worker 通过固定的 `/api/acg-background` 接口代理图片，并把该地址写入新转换主题的 `backgroundEnabled`、`lightBackgroundUrl` 和 `darkBackgroundUrl` 默认值；关闭时不会请求上游。图片本身不进入仓库、R2 或转换产物，该服务不保证 SLA，转换器始终保留纯色回退。
+背景来自 [夜轻随机二次元图片 API](https://blog.yeqing.net/acg-api/)。开启后，Worker 通过固定的 `/api/acg-background` 接口代理图片，并同时写入 Glassmorphism/GlassOps 使用的 `backgroundEnabled`、`lightBackgroundUrl`、`darkBackgroundUrl` 以及 LuminaPlus 使用的 `backgroundMediaType`、`backgroundImage`、`backgroundImageMobile`；关闭时不会请求上游。图片本身不进入仓库、R2 或转换产物，该服务不保证 SLA，转换器始终保留纯色回退。
 
 已经安装的主题不会因环境变量变化而被静默改写。开启后请从远程更新并选择覆盖 `config.json`，或在 NodeGet 主题设置中手动启用背景并填写：
 

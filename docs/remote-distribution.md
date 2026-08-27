@@ -19,10 +19,10 @@ NodeGet 会在该基址后请求 `nodeget-theme.json`、`nodeget-theme-files.jso
 Worker 返回的是轻量安装清单。NodeGet 只下载入口 HTML、兼容运行时、配置、预览等少量文件；原主题的构建资源由入口引用下面的内部固定版本地址：
 
 ```text
-https://<WORKER_DOMAIN>/themes/github/<OWNER>/<REPOSITORY>/releases/<ASSET_ID>/v1/...
+https://<WORKER_DOMAIN>/themes/github/<OWNER>/<REPOSITORY>/releases/<ASSET_ID>/v2/...
 ```
 
-这个固定地址由 Worker 自动生成，不需要手动导入 NodeGet。它避免 NodeGet 串行拉取几百个主题文件，也保证安装不会在 `latest` 指向新 Release 后丢失当前资源。末尾的 `v1` 是首版资源改写协议，包含 NodeGet 可见品牌、仓库 Logo 与固定 Release 资源引用。
+这个固定地址由 Worker 自动生成，不需要手动导入 NodeGet。它避免 NodeGet 串行拉取几百个主题文件，也保证安装不会在 `latest` 指向新 Release 后丢失当前资源。末尾的 `v2` 是当前资源改写协议；协议或转换逻辑升级时会使用新的缓存键，不会继续复用旧 R2 数据包。
 
 ## Release 选择
 
@@ -51,6 +51,8 @@ Worker 调用 GitHub `releases/latest` 获取最新正式 Release。公共 GitHu
 
 R2 桶名固定为 `komari-nodeget-theme-cache`，由 GitHub Actions 自动创建并通过 `THEME_CACHE` 绑定。桶不需要也不应开启 `r2.dev` 公共访问。
 
+每次生产部署完成后，workflow 会遍历白名单并请求清单、预览、入口、运行时、配置和一个 `v2` 固定资源。该步骤既会触发首次转换写入 R2，也会在任何主题转换失败、资源缺失或 ACG 配置未注入时让部署任务失败。手动只执行 `wrangler deploy` 不会预热，R2 会在第一次主题请求时懒加载。
+
 ## 配置白名单
 
 在 GitHub Actions Repository Variables 中设置：
@@ -61,6 +63,8 @@ ALLOWED_GITHUB_REPOSITORIES=owner/theme-one,owner/theme-two
 
 使用逗号分隔，不要加入空格。白名单为空时远程分发关闭。
 代码支持显式 `*`，但公开部署不应使用，否则任何人都能触发下载、CPU 和 R2 存储消耗。
+
+新增主题无需改 workflow 或适配器源码：把新的 `owner/repository` 追加到变量并重新运行部署即可。前提是该仓库的 Latest Release 有可唯一选择的 ZIP，且 ZIP 根目录符合 Komari 主题契约。
 
 “在 NodeGet 导入”按钮默认使用官方面板，也可以在同一位置配置自己的面板根地址：
 

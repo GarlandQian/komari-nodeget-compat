@@ -40,9 +40,17 @@ jobs:
         run: bun run setup:r2
 
       - name: Deploy Worker
+        id: deploy
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           packageManager: bun
           command: deploy --var "ACG_BACKGROUND_ENABLED:${{ vars.ACG_BACKGROUND_ENABLED || 'false' }}" --var "ALLOWED_GITHUB_REPOSITORIES:${{ vars.ALLOWED_GITHUB_REPOSITORIES || 'none' }}" --var "NODEGET_DASHBOARD_URL:${{ vars.NODEGET_DASHBOARD_URL || 'https://dash.nodeget.com' }}" --var "RELEASE_CHECK_TTL_SECONDS:${{ vars.RELEASE_CHECK_TTL_SECONDS || '300' }}"
+
+      - name: Prewarm and verify remote themes
+        env:
+          DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment-url }}
+          ALLOWED_GITHUB_REPOSITORIES: ${{ vars.ALLOWED_GITHUB_REPOSITORIES || 'none' }}
+          ACG_BACKGROUND_ENABLED: ${{ vars.ACG_BACKGROUND_ENABLED || 'false' }}
+        run: bun run prewarm

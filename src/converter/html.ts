@@ -59,7 +59,7 @@ function rewriteAssetUrl(value: string, themeShort: string): string {
     .replaceAll(`\/themes\/${themeShort}\/`, './')
   if (/^\/(assets|images|fonts)\//.test(normalized))
     return `.${normalized}`
-  if (/^\/(favicon\.(ico|png|svg)|manifest\.webmanifest)$/.test(normalized))
+  if (/^\/(favicon\.(ico|png|svg)|manifest\.(?:json|webmanifest))$/.test(normalized))
     return `.${normalized}`
   return normalized
 }
@@ -146,6 +146,19 @@ export function rewriteRemoteTextAssetReferences(
     `$1${remoteBaseUrl}/$2/`,
   )
   return rewriteViteAssetResolver(rewritten)
+}
+
+export function rewriteLocalThemeAssetReferences(text: string, themeShort: string): string {
+  const themePath = escapedRegExp(themeShort)
+  return text
+    .replace(
+      new RegExp(`(["'\\x60])\\/themes\\/${themePath}\\/(?:dist\\/)?`, 'g'),
+      '$1/',
+    )
+    .replace(
+      new RegExp(`(url\\(\\s*)\\/themes\\/${themePath}\\/(?:dist\\/)?`, 'gi'),
+      '$1/',
+    )
 }
 
 export function rewriteRemoteThemeAssets(

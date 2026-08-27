@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'bun:test'
-import { rewriteRemoteTextAssetReferences, rewriteRemoteThemeAssets } from '../src/converter/html'
+import {
+  injectCompatibilityRuntime,
+  rewriteLocalThemeAssetReferences,
+  rewriteRemoteTextAssetReferences,
+  rewriteRemoteThemeAssets,
+} from '../src/converter/html'
 
 const remoteBase = 'https://adapter.example/themes/github/owner/theme/releases/42'
 
@@ -42,5 +47,22 @@ describe('remote theme asset rewriting', () => {
     expect(rewritten).toContain('external="https://cdn.example/images/x.png"')
     expect(rewritten).toContain('pattern=(/images/)')
     expect(rewritten).toContain('assetUrl=function(e){return e.startsWith("http://")||e.startsWith("https://")||e.startsWith("//")?e:"/"+e}')
+  })
+
+  it('normalizes Komari theme paths for locally imported JS and CSS', () => {
+    const source = `const lazy="/themes/Fixture/dist/assets/lazy.js";const api="/api/public";.hero{background:url(/themes/Fixture/dist/images/bg.webp)}`
+    const rewritten = rewriteLocalThemeAssetReferences(source, 'Fixture')
+
+    expect(rewritten).toContain('lazy="/assets/lazy.js"')
+    expect(rewritten).toContain('url(/images/bg.webp)')
+    expect(rewritten).toContain('api="/api/public"')
+  })
+
+  it('normalizes a root-relative JSON web app manifest for local NodeGet imports', () => {
+    const output = injectCompatibilityRuntime(
+      '<!doctype html><html><head><link rel="manifest" href="/manifest.json"></head><body></body></html>',
+      'LuminaPlus',
+    )
+    expect(output).toContain('href="./manifest.json"')
   })
 })

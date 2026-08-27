@@ -209,7 +209,7 @@ describe('remote NodeGet theme distribution', () => {
       { fetcher, now: () => 1_000_150 },
     )
     const html = await indexResponse!.text()
-    const pinnedBase = 'https://adapter.example/themes/github/test-owner/test-theme/releases/30/v1'
+    const pinnedBase = 'https://adapter.example/themes/github/test-owner/test-theme/releases/30/v2'
     expect(html).toContain(`${pinnedBase}/assets/app.js`)
     expect(html).toContain(`${pinnedBase}/images/logo.png`)
     expect(html).toContain('https://adapter.example/nodeget-logo.png')
@@ -261,6 +261,40 @@ describe('remote NodeGet theme distribution', () => {
     expect(calls).toEqual({ api: 1, asset: 1 })
     expect(bucket.puts).toBe(3)
     expect([...bucket.objects.keys()].some(key => key.endsWith('/theme.pack'))).toBe(true)
+    expect([...bucket.objects.keys()].some(key => key.includes('/compat-v2/'))).toBe(true)
+    const alias = JSON.parse(await new MemoryObject(bucket.objects.get('aliases/github/test-owner/test-theme/latest.json')!).text())
+    expect(alias.schema).toBe(2)
+  })
+
+  it('rebuilds a cached release when the adapter conversion schema changes', async () => {
+    const source = sourceTheme()
+    const bucket = new MemoryBucket()
+    await bucket.put('aliases/github/test-owner/test-theme/latest.json', JSON.stringify({
+      schema: 1,
+      checkedAt: 1_000_000,
+      repository: 'test-owner/test-theme',
+      release: { id: 20, tag: 'v2.0.0', publishedAt: '2026-08-25T12:00:00Z' },
+      asset: {
+        id: 30,
+        name: 'komari-theme-build.zip',
+        browser_download_url: 'https://github.com/test-owner/test-theme/releases/download/v2.0.0/komari-theme-build.zip',
+        size: source.byteLength,
+      },
+      bundle: {
+        packKey: 'bundles/github/test-owner/test-theme/30/theme.pack',
+        indexKey: 'bundles/github/test-owner/test-theme/30/index.json',
+      },
+    }))
+    bucket.puts = 0
+    const { fetcher, calls } = fixtureFetch(source)
+    const response = await handleRemoteTheme(
+      new Request('https://adapter.example/themes/github/test-owner/test-theme/latest/nodeget-theme.json'),
+      environment(bucket),
+      { fetcher, now: () => 1_000_100 },
+    )
+    expect(response?.status).toBe(200)
+    expect(calls).toEqual({ api: 1, asset: 1 })
+    expect([...bucket.objects.keys()].some(key => key.includes('/compat-v2/theme.pack'))).toBe(true)
   })
 
   it('returns a stable NodeGet import address without starting a conversion', async () => {
@@ -344,7 +378,7 @@ describe('remote NodeGet theme distribution', () => {
     const bucket = new MemoryBucket()
     const { fetcher, calls } = fixtureFetch(sourceTheme())
     const response = await handleRemoteTheme(
-      new Request('https://adapter.example/themes/github/test-owner/test-theme/releases/999/v1/assets/app.js'),
+      new Request('https://adapter.example/themes/github/test-owner/test-theme/releases/999/v2/assets/app.js'),
       environment(bucket),
       { fetcher, now: () => 1_000_000 },
     )
@@ -421,7 +455,7 @@ describe('remote NodeGet theme distribution', () => {
       environment(bucket),
       { fetcher, now: () => 1_000_100 },
     )
-    expect(await firstIndex!.text()).toContain('/releases/30/v1/assets/app.js')
+    expect(await firstIndex!.text()).toContain('/releases/30/v2/assets/app.js')
 
     releaseIndex = 1
     const updated = await handleRemoteTheme(
@@ -439,10 +473,10 @@ describe('remote NodeGet theme distribution', () => {
       environment(bucket),
       { fetcher, now: () => 1_301_100 },
     )
-    expect(await updatedIndex!.text()).toContain('/releases/31/v1/assets/app.js')
+    expect(await updatedIndex!.text()).toContain('/releases/31/v2/assets/app.js')
 
     const oldAsset = await handleRemoteTheme(
-      new Request('https://adapter.example/themes/github/test-owner/test-theme/releases/30/v1/assets/app.js'),
+      new Request('https://adapter.example/themes/github/test-owner/test-theme/releases/30/v2/assets/app.js'),
       environment(bucket),
       { fetcher, now: () => 1_301_200 },
     )

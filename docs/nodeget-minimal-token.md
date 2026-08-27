@@ -30,6 +30,8 @@ NodeGet 当前版本可使用下面的 `token_limit`。它允许列出节点并�
 - `task_query`，仅查询 `ping` 与 `tcp_ping`
 - `kv_get_multi_value`，仅读取 `metadata_*`
 
+适配层不会请求 NodeGet 当前动态摘要协议中不存在的系统温度或 GPU 设备详情字段。主题若包含这些图表，运行时会通过 Metric 定义列表将其标记为不可用，而不是要求扩大 Token 权限。
+
 旧版 NodeGet 如果不支持 `agent-uuid_list_all`，将自动回落到 `nodeget-server_list_all_agent_uuid`。旧版 Token 可能还需要将 `{ "monitoring_uuid": "list" }` 替换为 `{ "node_get": "list_all_agent_uuid" }`；优先使用新版权限。
 
 不要授予 `Task::Create/Write/Delete`、KV 写入/删除、Terminal、Crontab 写入、配置读写、执行命令、WebShell、HTTP Request、自更新、JS Worker 或数据库权限。

@@ -48,6 +48,7 @@ export interface KomariPublicInfo {
   private_site: false
   record_enabled: true
   record_preserve_time: number
+  metric_retention_days: number
   sitename: string
   theme: string
   theme_settings: Record<string, unknown>
@@ -168,7 +169,12 @@ export interface MetricSeries {
   entity_id: string
   type: 'gauge' | 'counter'
   unit: string
+  retention_days?: number
   downsampled: boolean
+  downsample_algorithm?: string
+  fill_empty?: boolean
+  max_points?: number
+  interval_seconds?: number
   count: number
   points: MetricPoint[]
   tags: Record<string, string>
@@ -185,14 +191,26 @@ export interface MetricQueryParams {
   end?: string
   end_time?: string
   hours?: number
+  fill_empty?: boolean
   max_points?: number
   downsample_points?: number
+  max_points_by_metric?: Record<string, number>
+  points_by_metric?: Record<string, number>
+  aggregation?: string
+  algorithm?: string
+  aggregation_by_metric?: Record<string, string>
+  algorithm_by_metric?: Record<string, string>
   tags?: Record<string, string>
+  uuid?: string
+  task_id?: string | number
+  task_ids?: Array<string | number>
 }
 
 export interface MetricQueryResult {
   start: string
   end: string
+  server_downsample_default?: boolean
+  default_points?: number
   series: MetricSeries[]
   count: number
 }

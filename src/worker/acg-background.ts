@@ -1,4 +1,5 @@
 import { environmentFlagEnabled, isRecord } from '../shared/utils'
+import { COMPAT_VERSION } from '../version'
 
 export interface AcgBackgroundEnvironment {
   ACG_BACKGROUND_ENABLED?: string
@@ -84,7 +85,7 @@ export async function handleAcgBackground(
       cache: 'no-store',
       headers: {
         accept: 'application/json',
-        'user-agent': 'komari-nodeget-theme-adapter/0.3.2',
+        'user-agent': `komari-nodeget-theme-adapter/${COMPAT_VERSION}`,
       },
       redirect: 'manual',
       signal: request.signal,

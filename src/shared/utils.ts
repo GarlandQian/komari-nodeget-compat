@@ -92,6 +92,48 @@ export function downsampleEvenly<T>(values: readonly T[], maxCount: number): T[]
   return result
 }
 
+export function downsampleGroupsProportionally<K, T>(
+  groups: ReadonlyMap<K, readonly T[]>,
+  maxCount: number,
+): Map<K, T[]> {
+  const entries = [...groups.entries()]
+  const total = entries.reduce((count, [, values]) => count + values.length, 0)
+  if (maxCount < 0 || total <= maxCount)
+    return new Map(entries.map(([key, values]) => [key, [...values]]))
+  if (maxCount === 0)
+    return new Map(entries.map(([key]) => [key, []]))
+
+  const allocations = entries.map(([key, values], index) => {
+    const exact = values.length * maxCount / total
+    const count = Math.min(values.length, Math.floor(exact))
+    return { key, values, index, count, remainder: exact - count }
+  })
+  let assigned = allocations.reduce((count, allocation) => count + allocation.count, 0)
+  for (const allocation of [...allocations].sort((left, right) => (
+    right.remainder - left.remainder || left.index - right.index
+  ))) {
+    if (assigned >= maxCount)
+      break
+    if (allocation.count < allocation.values.length) {
+      allocation.count += 1
+      assigned += 1
+    }
+  }
+
+  for (let index = 0; assigned < maxCount && allocations.length; index = (index + 1) % allocations.length) {
+    const allocation = allocations[index]!
+    if (allocation.count < allocation.values.length) {
+      allocation.count += 1
+      assigned += 1
+    }
+    else if (allocations.every(item => item.count >= item.values.length)) {
+      break
+    }
+  }
+
+  return new Map(allocations.map(({ key, values, count }) => [key, downsampleEvenly(values, count)]))
+}
+
 export function asStringArray(value: unknown): string[] {
   if (Array.isArray(value))
     return value.map(String).map(item => item.trim()).filter(Boolean)

@@ -14,7 +14,8 @@ function sourceTheme(): Uint8Array {
     'preview.png': new Uint8Array([1, 2, 3]),
     'dist/assets/': new Uint8Array(),
     'dist/index.html': strToU8('<!doctype html><html><head><title>Komari Monitor</title><link rel="icon" href="/favicon.ico"><script type="module" src="/assets/app.js"></script></head><body><div id="app"></div></body></html>'),
-    'dist/assets/app.js': strToU8('const brand="Komari Monitor",technical=KomariRpc;fetch("/api/public")'),
+    'dist/assets/app.js': strToU8('const brand="Komari Monitor",technical=KomariRpc,lazy="/themes/Fixture/dist/assets/lazy.js";fetch("/api/public")'),
+    'dist/assets/app.css': strToU8('.hero{background:url(/themes/Fixture/dist/images/bg.webp)}'),
   })
 }
 
@@ -38,6 +39,9 @@ describe('theme archive conversion', () => {
     expect(html).toContain('<title>NodeGet Monitor</title>')
     expect(html).toContain('href="./favicon.ico"')
     expect(strFromU8(files['assets/app.js']!)).toContain('brand="NodeGet Monitor",technical=KomariRpc')
+    expect(strFromU8(files['assets/app.js']!)).toContain('lazy="/assets/lazy.js"')
+    expect(strFromU8(files['assets/app.js']!)).toContain('fetch("/api/public")')
+    expect(strFromU8(files['assets/app.css']!)).toContain('url(/images/bg.webp)')
 
     const fileManifest = JSON.parse(strFromU8(files['nodeget-theme-files.json']!)) as string[]
     expect(fileManifest).toContain('nodeget-theme-files.json')
@@ -46,7 +50,7 @@ describe('theme archive conversion', () => {
     expect(result.outputShort).toBe('NG-Fixture')
     expect(result.sourceName).toBe('Fixture')
     expect(result.sourceVersion).toBe('1.0.0')
-    expect(result.inputFileCount).toBe(4)
+    expect(result.inputFileCount).toBe(5)
     expect(result.outputFileCount).toBe(fileManifest.length)
   })
 

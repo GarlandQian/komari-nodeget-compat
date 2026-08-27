@@ -2,6 +2,7 @@ import type { KomariFacade } from '../komari/facade'
 import { KomariFacade as Facade } from '../komari/facade'
 import { NodeGetMonitorProvider } from '../nodeget/provider'
 import { publicErrorMessage } from '../shared/utils'
+import { COMPAT_VERSION } from '../version'
 import { loadRuntimeConfig } from './config'
 import { installWebSocketFacade } from './virtual-websocket'
 
@@ -70,7 +71,7 @@ export function installCompatibilityRuntime(): CompatibilityRuntimeHandle {
 
   const NativeWebSocket = installWebSocketFacade(window, facadePromise)
   const handle: CompatibilityRuntimeHandle = {
-    version: '0.3.2',
+    version: COMPAT_VERSION,
     ready: facadePromise.then(() => undefined),
     close() {
       window.fetch = nativeFetch

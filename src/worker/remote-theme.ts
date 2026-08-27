@@ -10,6 +10,11 @@ import {
 } from '../converter/appearance'
 import { rewriteRemoteTextAssetReferences, rewriteRemoteThemeAssets } from '../converter/html'
 import { environmentFlagEnabled, isRecord } from '../shared/utils'
+import {
+  REMOTE_ASSET_VERSION,
+  REMOTE_BUNDLE_SCHEMA,
+  REMOTE_CONVERSION_VERSION,
+} from '../version'
 
 export const REMOTE_THEME_INPUT_LIMIT = 32 * 1024 * 1024
 export const REMOTE_THEME_EXPANDED_LIMIT = 72 * 1024 * 1024
@@ -21,7 +26,6 @@ const MAX_RELEASE_CHECK_TTL_SECONDS = 86_400
 const DEFAULT_NODEGET_DASHBOARD_URL = 'https://dash.nodeget.com'
 const GITHUB_RELEASE_PAGE_LIMIT = 1024 * 1024
 const ROUTE_PREFIX = '/themes/github/'
-const REMOTE_ASSET_VERSION = 'v1'
 const REMOTE_INSTALL_FILES = [
   'nodeget-theme.json',
   'nodeget-theme-files.json',
@@ -182,7 +186,7 @@ function descendantAttribute(node: HtmlNode, tagName: string, attributeName: str
 }
 
 interface BundleAlias {
-  schema: 1
+  schema: typeof REMOTE_BUNDLE_SCHEMA
   checkedAt: number
   repository: string
   release: {
@@ -204,7 +208,7 @@ interface PackedFile {
 }
 
 interface BundleIndex {
-  schema: 1
+  schema: typeof REMOTE_BUNDLE_SCHEMA
   repository: string
   release: BundleAlias['release']
   asset: GitHubAsset
@@ -358,7 +362,7 @@ function aliasKey(route: RemoteThemeRoute): string {
 }
 
 function bundleKeys(route: RemoteThemeRoute, assetId: number): BundleAlias['bundle'] {
-  const prefix = `bundles/github/${route.owner.toLowerCase()}/${route.repo.toLowerCase()}/${assetId}`
+  const prefix = `bundles/github/${route.owner.toLowerCase()}/${route.repo.toLowerCase()}/${assetId}/${REMOTE_CONVERSION_VERSION}`
   return {
     packKey: `${prefix}/theme.pack`,
     indexKey: `${prefix}/index.json`,
@@ -379,7 +383,7 @@ function validGitHubAsset(value: unknown): value is GitHubAsset {
 }
 
 function validAlias(value: unknown): value is BundleAlias {
-  if (!isRecord(value) || value.schema !== 1 || !isRecord(value.release) || !isRecord(value.bundle))
+  if (!isRecord(value) || value.schema !== REMOTE_BUNDLE_SCHEMA || !isRecord(value.release) || !isRecord(value.bundle))
     return false
   return typeof value.checkedAt === 'number'
     && typeof value.repository === 'string'
@@ -389,11 +393,13 @@ function validAlias(value: unknown): value is BundleAlias {
     && validGitHubAsset(value.asset)
     && typeof value.bundle.packKey === 'string'
     && typeof value.bundle.indexKey === 'string'
+    && value.bundle.packKey.includes(`/${REMOTE_CONVERSION_VERSION}/`)
+    && value.bundle.indexKey.includes(`/${REMOTE_CONVERSION_VERSION}/`)
 }
 
 function validBundleIndex(value: unknown): value is BundleIndex {
   if (!isRecord(value)
-    || value.schema !== 1
+    || value.schema !== REMOTE_BUNDLE_SCHEMA
     || typeof value.repository !== 'string'
     || !isRecord(value.release)
     || !validGitHubAsset(value.asset)
@@ -785,7 +791,7 @@ async function buildBundle(
     publishedAt: release.published_at,
   }
   const alias: BundleAlias = {
-    schema: 1,
+    schema: REMOTE_BUNDLE_SCHEMA,
     checkedAt: now,
     repository: route.repository,
     release: releaseMeta,
@@ -821,7 +827,7 @@ async function buildBundle(
     throw new RemoteThemeError(413, 'converted_theme_too_large', 'Converted theme exceeds the remote cache size limit')
 
   const index: BundleIndex = {
-    schema: 1,
+    schema: REMOTE_BUNDLE_SCHEMA,
     repository: route.repository,
     release: releaseMeta,
     asset,
@@ -835,6 +841,7 @@ async function buildBundle(
       repository: route.repository,
       release: release.tag_name,
       asset_id: String(asset.id),
+      conversion: REMOTE_CONVERSION_VERSION,
     },
   })
   await bucket.put(bundle.indexKey, JSON.stringify(index), {
@@ -886,7 +893,7 @@ async function resolveBundle(
     return refreshed
   }
 
-  const buildKey = `${route.repository.toLowerCase()}:${latest.asset.id}`
+  const buildKey = `${REMOTE_CONVERSION_VERSION}:${route.repository.toLowerCase()}:${latest.asset.id}`
   const active = activeBuilds.get(buildKey)
   if (active)
     return active
@@ -926,7 +933,7 @@ async function resolvePinnedBundle(
   return {
     index,
     alias: {
-      schema: 1,
+      schema: REMOTE_BUNDLE_SCHEMA,
       checkedAt: now,
       repository: index.repository,
       release: index.release,
@@ -945,7 +952,7 @@ function fileHeaders(route: RemoteThemeRoute, alias: BundleAlias, file: PackedFi
       : 'no-cache',
     'content-length': String(file.length),
     'content-type': file.contentType,
-    etag: `"${alias.asset.id}-${file.offset}-${file.length}"`,
+    etag: `"${alias.asset.id}-${REMOTE_CONVERSION_VERSION}-${file.offset}-${file.length}"`,
     'last-modified': new Date(alias.release.publishedAt).toUTCString(),
     'referrer-policy': 'no-referrer',
     'x-content-type-options': 'nosniff',

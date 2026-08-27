@@ -109,6 +109,7 @@ export class FakeMonitorProvider implements MonitorProvider {
       private_site: false,
       record_enabled: true,
       record_preserve_time: 720,
+      metric_retention_days: 30,
       sitename: 'Test Site',
       theme: 'TestTheme',
       theme_settings: { dense: true },

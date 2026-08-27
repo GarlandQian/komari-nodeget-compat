@@ -18,7 +18,7 @@ export function rewriteThemeAppearanceText(
   source: string,
   appearance: ThemeAppearance = {},
 ): string {
-  let output = nodeGetBrandText(source)
+  let output = brandTextOutsideUrls(source)
   if (!appearance.logoUrl)
     return output
 
@@ -30,14 +30,17 @@ export function rewriteThemeAppearanceText(
   ))
 }
 
-function brandValue(value: unknown): unknown {
-  if (typeof value === 'string')
-    return nodeGetBrandText(value)
-  if (Array.isArray(value))
-    return value.map(brandValue)
-  if (!isRecord(value))
-    return value
-  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, brandValue(entry)]))
+function brandTextOutsideUrls(value: string): string {
+  const urlPattern = /(?:https?:)?\/\/[^\s"'`<>()]+/gi
+  let output = ''
+  let offset = 0
+  for (const match of value.matchAll(urlPattern)) {
+    const index = match.index ?? offset
+    output += nodeGetBrandText(value.slice(offset, index))
+    output += match[0]
+    offset = index + match[0].length
+  }
+  return output + nodeGetBrandText(value.slice(offset))
 }
 
 function preferenceOverrides(appearance: ThemeAppearance): Record<string, unknown> {
@@ -48,6 +51,9 @@ function preferenceOverrides(appearance: ThemeAppearance): Record<string, unknow
     backgroundType: 'image',
     lightBackgroundUrl: appearance.backgroundUrl,
     darkBackgroundUrl: appearance.backgroundUrl,
+    backgroundMediaType: 'image',
+    backgroundImage: appearance.backgroundUrl,
+    backgroundImageMobile: appearance.backgroundUrl,
   }
 }
 
@@ -71,7 +77,11 @@ export function applyThemeAppearanceToManifest(
   source: Record<string, unknown>,
   appearance: ThemeAppearance = {},
 ): Record<string, unknown> {
-  const manifest = brandValue(source) as Record<string, unknown>
+  const manifest = { ...source }
+  for (const key of ['name', 'description'] as const) {
+    if (typeof manifest[key] === 'string')
+      manifest[key] = nodeGetBrandText(manifest[key] as string)
+  }
   const form = isRecord(manifest.user_preferences_form)
     ? { ...manifest.user_preferences_form }
     : null
@@ -80,9 +90,21 @@ export function applyThemeAppearanceToManifest(
 
   const overrides = preferenceOverrides(appearance)
   form.items = form.items.map((entry) => {
-    if (!isRecord(entry) || typeof entry.key !== 'string' || !(entry.key in overrides))
+    if (!isRecord(entry))
       return entry
-    return { ...entry, default: overrides[entry.key] }
+    const converted = { ...entry }
+    if (typeof converted.name === 'string')
+      converted.name = nodeGetBrandText(converted.name)
+    if (typeof converted.help === 'string')
+      converted.help = nodeGetBrandText(converted.help)
+    if (typeof converted.key === 'string'
+      && CONFIG_BRAND_KEYS.includes(converted.key as typeof CONFIG_BRAND_KEYS[number])
+      && typeof converted.default === 'string') {
+      converted.default = nodeGetBrandText(converted.default)
+    }
+    if (typeof converted.key === 'string' && converted.key in overrides)
+      converted.default = overrides[converted.key]
+    return converted
   })
   manifest.user_preferences_form = form
   return manifest
