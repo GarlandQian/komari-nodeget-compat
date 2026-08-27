@@ -48,4 +48,25 @@ describe('runtime config', () => {
     )
     expect(loaded.config.site_tokens?.[0]?.backend_url).toBe('https://nodeget.example')
   })
+
+  it('rejects malformed preference and compatibility metadata before installing hooks', async () => {
+    await expect(loadRuntimeConfig(
+      fixtureFetch({
+        user_preferences: 'not-an-object',
+        site_tokens: [{ backend_url: 'https://nodeget.example', token: 'read-only-token' }],
+      }),
+      new URL('https://theme.example/'),
+    )).rejects.toThrow('user_preferences must be an object')
+
+    const invalidManifestFetch = (async (input: RequestInfo | URL) => {
+      const pathname = new URL(String(input)).pathname
+      return Response.json(pathname.endsWith('komari-compat.json')
+        ? { ...compatManifest, themeSettingKeys: [1] }
+        : { site_tokens: [{ backend_url: 'https://nodeget.example', token: 'read-only-token' }] })
+    }) as typeof fetch
+    await expect(loadRuntimeConfig(
+      invalidManifestFetch,
+      new URL('https://theme.example/'),
+    )).rejects.toThrow('theme setting keys must be strings')
+  })
 })

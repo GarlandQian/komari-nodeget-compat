@@ -42,6 +42,7 @@ describe('KomariFacade', () => {
     expect(realtime.status).toBe('success')
     expect(realtime.data.online).toEqual([TEST_UUID])
     expect(realtime.data.data[TEST_UUID].cpu.usage).toBe(12.5)
+    expect(realtime.data.data[TEST_UUID].connections).toEqual({ tcp: 15, udp: 5 })
 
     const stats = await facade.handleRpcPayload({
       jsonrpc: '2.0', id: 2, method: 'public:getPingMetricStats', params: { entity_id: TEST_UUID },
@@ -90,5 +91,82 @@ describe('KomariFacade', () => {
     expect(ping.result.count).toBe(2)
     expect(ping.result.from).toBeString()
     expect(ping.result.to).toBeString()
+  })
+
+  it('matches single-status, load projection, and metric validation semantics', async () => {
+    const facade = new KomariFacade(new FakeMonitorProvider())
+    const status = await facade.handleRpcPayload({
+      jsonrpc: '2.0', id: 9, method: 'common:getNodesLatestStatus', params: { uuid: TEST_UUID },
+    }) as any
+    expect(status.result.client).toBe(TEST_UUID)
+    expect(status.result[TEST_UUID]).toBeUndefined()
+
+    const load = await facade.handleRpcPayload({
+      jsonrpc: '2.0', id: 10, method: 'common:getRecords',
+      params: { type: 'load', uuid: TEST_UUID, load_type: 'network', hours: 1 },
+    }) as any
+    expect(load.result.load_type).toBe('network')
+    expect(load.result.records[TEST_UUID][0]).toEqual({
+      client: TEST_UUID,
+      time: '2026-08-25T12:00:00.000Z',
+      net_in: 1_000,
+      net_out: 500,
+      net_total_up: 10_000,
+      net_total_down: 20_000,
+    })
+
+    const invalidMetrics = await facade.handleRpcPayload({
+      jsonrpc: '2.0', id: 11, method: 'public:queryMetrics', params: {},
+    }) as any
+    expect(invalidMetrics.error.code).toBe(-32602)
+    expect(invalidMetrics.error.message).toContain('metric_keys is required')
+  })
+
+  it('filters Ping metric statistics by requested task IDs', async () => {
+    const facade = new KomariFacade(new FakeMonitorProvider())
+    const response = await facade.handleRpcPayload({
+      jsonrpc: '2.0', id: 12, method: 'public:getPingMetricStats',
+      params: { entity_ids: [TEST_UUID], task_ids: [999] },
+    }) as any
+    expect(response.result.stats).toEqual([])
+    expect(response.result.count).toBe(0)
+  })
+
+  it('matches public record projections and Ping parameter validation', async () => {
+    const facade = new KomariFacade(new FakeMonitorProvider())
+    const ram = await facade.handleRpcPayload({
+      jsonrpc: '2.0', id: 13, method: 'public:getRecordsByUUID',
+      params: { uuid: TEST_UUID, load_type: 'ram' },
+    }) as any
+    expect(ram.result.records[0]).toEqual({
+      client: TEST_UUID,
+      time: '2026-08-25T12:00:00.000Z',
+      ram: 4_000,
+      ram_total: 8_000,
+      ram_percent: 50,
+    })
+
+    const connections = await facade.handleRpcPayload({
+      jsonrpc: '2.0', id: 14, method: 'public:getRecordsByUUID',
+      params: { uuid: TEST_UUID, load_type: 'connections' },
+    }) as any
+    expect(connections.result.records[0].connections_tcp).toBe(15)
+
+    const missingFilter = await facade.handleRpcPayload({
+      jsonrpc: '2.0', id: 15, method: 'public:getPingRecords', params: {},
+    }) as any
+    expect(missingFilter.error.code).toBe(-32602)
+    expect(missingFilter.error.message).toBe('UUID or task_id is required')
+
+    const invalidTask = await facade.handleRpcPayload({
+      jsonrpc: '2.0', id: 16, method: 'public:getPingRecords', params: { task_id: 'bad' },
+    }) as any
+    expect(invalidTask.error.code).toBe(-32602)
+
+    const invalidRecordType = await facade.handleRpcPayload({
+      jsonrpc: '2.0', id: 17, method: 'common:getRecords', params: { type: 'unknown' },
+    }) as any
+    expect(invalidRecordType.error.code).toBe(-32602)
+    expect(invalidRecordType.error.message).toContain('Invalid record type')
   })
 })

@@ -13,6 +13,8 @@ interface WebSocketLike {
 
 type WebSocketFactory = (url: string) => WebSocketLike
 
+const SOCKET_OPEN = 1
+
 interface PendingRequest {
   resolve: (value: unknown) => void
   reject: (reason: unknown) => void
@@ -61,8 +63,10 @@ export class NodeGetRpcClient implements NodeGetCaller {
     params: Record<string, unknown> = {},
     options: { timeoutMs?: number, signal?: AbortSignal } = {},
   ): Promise<T> {
+    if (options.signal?.aborted)
+      throw options.signal.reason ?? new DOMException('Aborted', 'AbortError')
     await this.connect()
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN)
+    if (!this.socket || this.socket.readyState !== SOCKET_OPEN)
       throw new NodeGetRpcError('NodeGet WebSocket is not connected')
 
     const id = ++this.nextId
@@ -120,7 +124,7 @@ export class NodeGetRpcClient implements NodeGetCaller {
   }
 
   private async connect(): Promise<void> {
-    if (this.socket?.readyState === WebSocket.OPEN)
+    if (this.socket?.readyState === SOCKET_OPEN)
       return
     if (this.connecting)
       return this.connecting
@@ -134,6 +138,8 @@ export class NodeGetRpcClient implements NodeGetCaller {
         if (settled)
           return
         settled = true
+        if (this.socket === socket)
+          this.socket = null
         socket.close(4000, 'Connection timeout')
         reject(new NodeGetRpcError('NodeGet WebSocket connection timed out', -32001))
       }, 12_000)
@@ -152,15 +158,22 @@ export class NodeGetRpcClient implements NodeGetCaller {
           return
         settled = true
         clearTimeout(timeout)
+        if (this.socket === socket)
+          this.socket = null
+        socket.close(4001, 'Connection failed')
         reject(new NodeGetRpcError('NodeGet WebSocket connection failed'))
       }
 
-      socket.onmessage = event => this.handleMessage(event.data)
+      socket.onmessage = (event) => {
+        if (this.socket === socket)
+          this.handleMessage(event.data)
+      }
       socket.onclose = () => {
         clearTimeout(timeout)
-        if (this.socket === socket)
+        if (this.socket === socket) {
           this.socket = null
-        this.rejectAll(new NodeGetRpcError('NodeGet WebSocket disconnected'))
+          this.rejectAll(new NodeGetRpcError('NodeGet WebSocket disconnected'))
+        }
         if (!settled) {
           settled = true
           reject(new NodeGetRpcError('NodeGet WebSocket closed before opening'))

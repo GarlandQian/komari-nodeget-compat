@@ -19,7 +19,7 @@ import type {
   PingRecordsResult,
 } from '../types'
 import type { NodeGetCaller } from './rpc-client'
-import { asStringArray, finiteNumber } from '../shared/utils'
+import { asStringArray, downsampleGroupsProportionally, finiteNumber, isRecord } from '../shared/utils'
 import { NodeGetRpcClient } from './rpc-client'
 import { NodeGetSource } from './source'
 
@@ -30,6 +30,20 @@ interface ClientRoute {
 
 type CallerFactory = (entry: NodeGetSiteToken) => NodeGetCaller
 
+const CLIENT_CACHE_TTL_MS = 30_000
+const RESERVED_PREFERENCES = new Set([
+  'site_name',
+  'site_title',
+  'site_description',
+  'footer',
+  'record_preserve_time',
+  'ping_record_preserve_time',
+  'metric_retention_days',
+  '__proto__',
+  'constructor',
+  'prototype',
+])
+
 function cloneStatus(status: KomariNodeStatus, client: string): KomariNodeStatus {
   return { ...status, client }
 }
@@ -38,11 +52,22 @@ function cloneRecord(record: KomariStatusRecord, client: string): KomariStatusRe
   return { ...record, client }
 }
 
+function fulfilledOrThrow<T>(results: PromiseSettledResult<T>[]): T[] {
+  const values = results.flatMap((result): T[] => result.status === 'fulfilled' ? [result.value] : [])
+  if (values.length)
+    return values
+  const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+  if (failure)
+    throw failure.reason
+  return []
+}
+
 export class NodeGetMonitorProvider implements MonitorProvider {
   private readonly sources: NodeGetSource[]
   private readonly routes = new Map<string, ClientRoute>()
   private readonly publicIdBySourceAndRaw = new Map<string, string>()
   private clientsPromise: Promise<Record<string, KomariClient>> | null = null
+  private clientsExpiresAt = 0
 
   constructor(
     private readonly config: NodeGetThemeConfig,
@@ -59,14 +84,18 @@ export class NodeGetMonitorProvider implements MonitorProvider {
   }
 
   async getPublicInfo(): Promise<KomariPublicInfo> {
-    const preferences = this.config.user_preferences ?? {}
-    const themeSettings = { ...this.manifest.themeSettingsDefaults }
-    for (const key of this.manifest.themeSettingKeys) {
-      if (!(key in preferences))
+    const preferences = isRecord(this.config.user_preferences) ? this.config.user_preferences : {}
+    const themeSettings = Object.create(null) as Record<string, unknown>
+    for (const [key, value] of Object.entries(this.manifest.themeSettingsDefaults)) {
+      if (!RESERVED_PREFERENCES.has(key))
+        themeSettings[key] = value
+    }
+    for (const [key, value] of Object.entries(preferences)) {
+      if (RESERVED_PREFERENCES.has(key))
         continue
       themeSettings[key] = this.manifest.themeSettingArrayKeys.includes(key)
-        ? asStringArray(preferences[key])
-        : preferences[key]
+        ? asStringArray(value)
+        : value
     }
 
     return {
@@ -81,6 +110,7 @@ export class NodeGetMonitorProvider implements MonitorProvider {
       private_site: false,
       record_enabled: true,
       record_preserve_time: finiteNumber(preferences.record_preserve_time, 720),
+      metric_retention_days: 30,
       sitename: String(preferences.site_name ?? preferences.site_title ?? this.manifest.source.name),
       theme: this.manifest.source.short,
       theme_settings: themeSettings,
@@ -93,11 +123,18 @@ export class NodeGetMonitorProvider implements MonitorProvider {
 
   async getClients(): Promise<Record<string, KomariClient>> {
     this.requireSources()
-    if (!this.clientsPromise)
-      this.clientsPromise = this.loadClients().catch((error) => {
-        this.clientsPromise = null
-        throw error
-      })
+    if (!this.clientsPromise || (this.clientsExpiresAt > 0 && Date.now() >= this.clientsExpiresAt)) {
+      this.clientsPromise = this.loadClients()
+        .then((clients) => {
+          this.clientsExpiresAt = Date.now() + CLIENT_CACHE_TTL_MS
+          return clients
+        })
+        .catch((error) => {
+          this.clientsPromise = null
+          this.clientsExpiresAt = 0
+          throw error
+        })
+    }
     return this.clientsPromise
   }
 
@@ -109,7 +146,7 @@ export class NodeGetMonitorProvider implements MonitorProvider {
     const grouped = this.groupRoutes(routes)
     const statuses: Record<string, KomariNodeStatus> = {}
 
-    await Promise.all([...grouped.entries()].map(async ([source, selected]) => {
+    const results = await Promise.allSettled([...grouped.entries()].map(async ([source, selected]) => {
       const sourceStatuses = await source.getLatestStatuses(selected.map(item => item.route.rawUuid))
       for (const item of selected) {
         const status = sourceStatuses[item.route.rawUuid]
@@ -117,6 +154,7 @@ export class NodeGetMonitorProvider implements MonitorProvider {
           statuses[item.publicUuid] = cloneStatus(status, item.publicUuid)
       }
     }))
+    fulfilledOrThrow(results)
     return statuses
   }
 
@@ -137,8 +175,8 @@ export class NodeGetMonitorProvider implements MonitorProvider {
     }
 
     const output: Record<string, KomariStatusRecord[]> = {}
-    await Promise.all(this.sources.map(async (source) => {
-      const sourceRecords = await source.getLoadRecords(query)
+    const results = await Promise.allSettled(this.sources.map(async (source) => {
+      const sourceRecords = await source.getLoadRecords({ ...query, maxCount: -1 })
       if (Array.isArray(sourceRecords))
         return
       for (const [rawUuid, records] of Object.entries(sourceRecords)) {
@@ -147,7 +185,11 @@ export class NodeGetMonitorProvider implements MonitorProvider {
           output[publicUuid] = records.map(record => cloneRecord(record, publicUuid))
       }
     }))
-    return output
+    fulfilledOrThrow(results)
+    return Object.fromEntries(downsampleGroupsProportionally(
+      new Map(Object.entries(output)),
+      query.maxCount,
+    ))
   }
 
   async getPingRecords(query: PingRecordQuery): Promise<PingRecordsResult> {
@@ -158,10 +200,20 @@ export class NodeGetMonitorProvider implements MonitorProvider {
       return this.remapPingResult(route.source, result)
     }
 
-    const results = await Promise.all(this.sources.map(source => source.getPingRecords(query)
-      .then(result => this.remapPingResult(source, result))))
-    const records = results.flatMap(result => result.records)
+    const results = fulfilledOrThrow(await Promise.allSettled(this.sources.map(source => source.getPingRecords({
+      ...query,
+      maxCount: -1,
+    })
+      .then(result => this.remapPingResult(source, result)))))
+    const allRecords = results.flatMap(result => result.records)
       .sort((left, right) => Date.parse(left.time) - Date.parse(right.time))
+    const records = [...downsampleGroupsProportionally(
+      new Map([...new Set(allRecords.map(record => record.task_id))].map(taskId => [
+        taskId,
+        allRecords.filter(record => record.task_id === taskId),
+      ])),
+      query.maxCount,
+    ).values()].flat().sort((left, right) => Date.parse(left.time) - Date.parse(right.time))
     const tasksById = new Map<number, KomariPingTask>()
     for (const task of results.flatMap(result => result.tasks)) {
       const current = tasksById.get(task.id)
@@ -179,8 +231,8 @@ export class NodeGetMonitorProvider implements MonitorProvider {
 
   async getPingTasks(): Promise<KomariPingTask[]> {
     await this.ensureRoutes()
-    const taskLists = await Promise.all(this.sources.map(async source => (await source.getPingTasks())
-      .map(task => this.remapTask(source, task))))
+    const taskLists = fulfilledOrThrow(await Promise.allSettled(this.sources.map(async source => (await source.getPingTasks())
+      .map(task => this.remapTask(source, task)))))
     return taskLists.flat().sort((left, right) => left.id - right.id)
   }
 
@@ -191,14 +243,21 @@ export class NodeGetMonitorProvider implements MonitorProvider {
 
   async queryMetrics(params: MetricQueryParams): Promise<MetricQueryResult> {
     await this.ensureRoutes()
-    const requestedIds = params.entity_ids?.length
+    const requestedIds = [...new Set((params.entity_ids?.length
       ? params.entity_ids
       : params.entity_id
         ? [params.entity_id]
-        : [...this.routes.keys()]
-    const routes = requestedIds.map(uuid => [uuid, this.routeFor(uuid)] as const)
+        : [...this.routes.keys()]).map(id => id.trim()).filter(Boolean))]
+    const emptyResult = this.sources[0]!.emptyMetricResult(
+      params,
+      requestedIds.filter(uuid => !this.routes.has(uuid)),
+    )
+    const routes = requestedIds.flatMap((uuid) => {
+      const route = this.routes.get(uuid)
+      return route ? [[uuid, route] as const] : []
+    })
     const grouped = this.groupRoutes(routes)
-    const results = await Promise.all([...grouped.entries()].map(async ([source, selected]) => {
+    const pending = [...grouped.entries()].map(async ([source, selected]) => {
       const { entity_id: _entityId, entity_ids: _entityIds, ...rest } = params
       const result = await source.queryMetrics({
         ...rest,
@@ -211,14 +270,20 @@ export class NodeGetMonitorProvider implements MonitorProvider {
           return { ...series, entity_id: publicUuid ?? series.entity_id }
         }),
       }
-    }))
+    })
+    const results = pending.length ? fulfilledOrThrow(await Promise.allSettled(pending)) : []
 
-    const series = results.flatMap(result => result.series)
-    const starts = results.map(result => Date.parse(result.start)).filter(Number.isFinite)
-    const ends = results.map(result => Date.parse(result.end)).filter(Number.isFinite)
+    const combined = [emptyResult, ...results]
+    const series = combined.flatMap(result => result.series)
+      .sort((left, right) => `${left.entity_id}:${left.metric_key}:${left.tags.task_id ?? ''}`
+        .localeCompare(`${right.entity_id}:${right.metric_key}:${right.tags.task_id ?? ''}`))
+    const starts = combined.map(result => Date.parse(result.start)).filter(Number.isFinite)
+    const ends = combined.map(result => Date.parse(result.end)).filter(Number.isFinite)
     return {
       start: new Date(starts.length ? Math.min(...starts) : Date.now()).toISOString(),
       end: new Date(ends.length ? Math.max(...ends) : Date.now()).toISOString(),
+      server_downsample_default: true,
+      default_points: results[0]?.default_points ?? emptyResult.default_points ?? 500,
       series,
       count: series.length,
     }
@@ -235,15 +300,15 @@ export class NodeGetMonitorProvider implements MonitorProvider {
   }
 
   private async ensureRoutes(): Promise<void> {
-    if (!this.routes.size)
-      await this.getClients()
+    await this.getClients()
   }
 
   private async loadClients(): Promise<Record<string, KomariClient>> {
-    const sourceClients = await Promise.all(this.sources.map(async source => ({
+    const previousPublicIds = new Map(this.publicIdBySourceAndRaw)
+    const sourceClients = fulfilledOrThrow(await Promise.allSettled(this.sources.map(async source => ({
       source,
       clients: await source.getClients(),
-    })))
+    }))))
     const occurrences = new Map<string, number>()
     for (const { clients } of sourceClients) {
       for (const rawUuid of Object.keys(clients))
@@ -253,13 +318,24 @@ export class NodeGetMonitorProvider implements MonitorProvider {
     this.routes.clear()
     this.publicIdBySourceAndRaw.clear()
     const result: Record<string, KomariClient> = {}
+    const usedPublicIds = new Set<string>()
     for (const { source, clients } of sourceClients) {
       for (const [rawUuid, client] of Object.entries(clients)) {
         if (client.hidden)
           continue
-        const publicUuid = occurrences.get(rawUuid) === 1 ? rawUuid : `${source.key}-${rawUuid}`
+        const sourceRawKey = this.sourceRawKey(source, rawUuid)
+        const candidates = [
+          previousPublicIds.get(sourceRawKey),
+          occurrences.get(rawUuid) === 1 ? rawUuid : `${source.key}-${rawUuid}`,
+          `${source.key}-${rawUuid}`,
+        ].filter((value): value is string => Boolean(value))
+        let publicUuid = candidates.find(candidate => !usedPublicIds.has(candidate))
+          ?? `${source.key}-${rawUuid}`
+        for (let suffix = 2; usedPublicIds.has(publicUuid); suffix += 1)
+          publicUuid = `${source.key}-${rawUuid}-${suffix}`
+        usedPublicIds.add(publicUuid)
         this.routes.set(publicUuid, { source, rawUuid })
-        this.publicIdBySourceAndRaw.set(this.sourceRawKey(source, rawUuid), publicUuid)
+        this.publicIdBySourceAndRaw.set(sourceRawKey, publicUuid)
         result[publicUuid] = { ...client, uuid: publicUuid }
       }
     }

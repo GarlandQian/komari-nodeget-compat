@@ -17,6 +17,7 @@ import type {
 import type { NodeGetCaller } from './rpc-client'
 import {
   downsampleEvenly,
+  downsampleGroupsProportionally,
   finiteNumber,
   firstFiniteValue,
   isRecord,
@@ -49,9 +50,29 @@ const DYNAMIC_FIELDS = [
 ] as const
 
 const GIBIBYTE_BYTES = 1024 ** 3
+const DEFAULT_METRIC_POINTS = 500
+const MAX_METRIC_POINTS = 20_000
+const MAX_HISTORY_RANGE_MS = 30 * 24 * 3_600_000
+const TRAFFIC_PREDECESSOR_LOOKBACK_MS = 2 * 3_600_000
 const TRAFFIC_EXTENSION_BILLING_MODES = new Set(['quota', 'payg'])
 const TRAFFIC_EXTENSION_PERIODS = new Set(['hourly', 'daily', 'weekly', 'monthly', 'never'])
+const TRAFFIC_PERIOD_CACHE_TTL_MS = 60_000
+const TRAFFIC_PERIOD_RETRY_MS = 15_000
 const TRAFFIC_LIMIT_TYPES = new Set(['sum', 'max', 'min', 'up', 'down'])
+const METRIC_AGGREGATIONS = new Set([
+  'avg',
+  'min',
+  'max',
+  'sum',
+  'count',
+  'p50',
+  'p95',
+  'p99',
+  'first',
+  'last',
+  'rate',
+  'stddev',
+])
 
 const METADATA_KEYS = [
   'metadata_name',
@@ -73,6 +94,18 @@ const METADATA_KEYS = [
   'metadata_traffic_limit_type',
   'metadata_billing_mode',
   'metadata_traffic_period',
+  'metadata_traffic_period_start',
+  'metadata_traffic_period_base',
+  'metadata_traffic_used',
+] as const
+
+const TRAFFIC_PERIOD_METADATA_KEYS = [
+  'metadata_billing_mode',
+  'metadata_traffic_limit',
+  'metadata_traffic_period',
+  'metadata_traffic_period_start',
+  'metadata_traffic_period_base',
+  'metadata_traffic_used',
 ] as const
 
 const METRIC_DEFINITIONS: MetricDefinition[] = [
@@ -89,8 +122,8 @@ const METRIC_DEFINITIONS: MetricDefinition[] = [
   metricDefinition('net.out.rate', 'Network transmit rate', 'gauge', 'bytes_per_second'),
   metricDefinition('net.total.down', 'Total received traffic', 'counter', 'bytes'),
   metricDefinition('net.total.up', 'Total transmitted traffic', 'counter', 'bytes'),
-  metricDefinition('traffic.down', 'Total received traffic', 'counter', 'bytes'),
-  metricDefinition('traffic.up', 'Total transmitted traffic', 'counter', 'bytes'),
+  metricDefinition('traffic.down', 'Traffic download delta', 'gauge', 'bytes'),
+  metricDefinition('traffic.up', 'Traffic upload delta', 'gauge', 'bytes'),
   metricDefinition('process.count', 'Process count', 'gauge', 'count'),
   metricDefinition('connections.tcp', 'TCP connections', 'gauge', 'count'),
   metricDefinition('connections.udp', 'UDP connections', 'gauge', 'count'),
@@ -111,6 +144,23 @@ interface RawTaskRow {
   row: Record<string, unknown>
   requestedType: string
 }
+
+interface RawTrafficState {
+  down: number
+  timestamp: number
+  up: number
+  uptime: number
+}
+
+interface TrafficPeriodState {
+  base: number
+  enabled: boolean
+  start: number
+  used: number
+}
+
+type MetricAggregation = 'avg' | 'min' | 'max' | 'sum' | 'count' | 'p50' | 'p95' | 'p99'
+  | 'first' | 'last' | 'rate' | 'stddev'
 
 function groupBy<T, K>(values: Iterable<T>, keyFor: (value: T) => K): Map<K, T[]> {
   const groups = new Map<K, T[]>()
@@ -180,6 +230,21 @@ function mapPayload(value: unknown): Record<string, Record<string, unknown>> {
   return result
 }
 
+function kvPayloadByNamespace(value: unknown): Record<string, Record<string, unknown>> {
+  const byNamespace: Record<string, Record<string, unknown>> = {}
+  for (const row of arrayPayload(value)) {
+    if (!isRecord(row))
+      continue
+    const namespace = stringValue(row.namespace)
+    const key = stringValue(row.key)
+    if (!namespace || !key)
+      continue
+    byNamespace[namespace] ??= {}
+    byNamespace[namespace]![key] = row.value
+  }
+  return byNamespace
+}
+
 function stringValue(value: unknown, fallback = ''): string {
   if (value == null)
     return fallback
@@ -233,10 +298,10 @@ function trafficLimitMetadata(kv: Record<string, unknown>): {
   const billingMode = stringValue(parseJsonValue(kv.metadata_billing_mode, '')).toLowerCase()
   const period = stringValue(parseJsonValue(kv.metadata_traffic_period, '')).toLowerCase()
   const extensionConfigured = TRAFFIC_EXTENSION_PERIODS.has(period)
-    && (TRAFFIC_EXTENSION_BILLING_MODES.has(billingMode) || rawLimit > 0)
+    && TRAFFIC_EXTENSION_BILLING_MODES.has(billingMode)
 
   if (extensionConfigured) {
-    if (billingMode === 'payg')
+    if (billingMode === 'payg' || period === 'never')
       return { limit: 0, type: 'sum' }
     const bytes = Math.round(rawLimit * GIBIBYTE_BYTES)
     return {
@@ -252,6 +317,58 @@ function trafficLimitMetadata(kv: Record<string, unknown>): {
       ? rawType as KomariClient['traffic_limit_type']
       : 'sum',
   }
+}
+
+function trafficPeriodMetadata(kv: Record<string, unknown>): TrafficPeriodState {
+  const billingMode = stringValue(parseJsonValue(kv.metadata_billing_mode, '')).toLowerCase()
+  const period = stringValue(parseJsonValue(kv.metadata_traffic_period, '')).toLowerCase()
+  const rawLimit = finiteNumber(parseJsonValue(kv.metadata_traffic_limit, 0))
+  return {
+    enabled: billingMode === 'quota'
+      && period !== 'never'
+      && TRAFFIC_EXTENSION_PERIODS.has(period)
+      && rawLimit > 0,
+    start: Math.max(0, timestampMs(parseJsonValue(kv.metadata_traffic_period_start, 0))),
+    base: Math.max(0, finiteNumber(parseJsonValue(kv.metadata_traffic_period_base, 0))),
+    used: Math.max(0, finiteNumber(parseJsonValue(kv.metadata_traffic_used, 0))),
+  }
+}
+
+function rawTrafficState(dynamic: Record<string, unknown>): RawTrafficState {
+  return {
+    timestamp: timestampMs(dynamic.timestamp ?? dynamic.storage_time),
+    uptime: firstFiniteValue(dynamic, ['uptime']),
+    up: Math.max(0, firstFiniteValue(dynamic, ['total_transmitted'])),
+    down: Math.max(0, firstFiniteValue(dynamic, ['total_received'])),
+  }
+}
+
+function trafficDelta(current: RawTrafficState, previous: RawTrafficState | undefined, direction: 'up' | 'down'): number {
+  if (!previous || current.timestamp <= previous.timestamp || current.uptime < previous.uptime)
+    return 0
+  const currentValue = current[direction]
+  const previousValue = previous[direction]
+  return currentValue >= previousValue ? currentValue - previousValue : 0
+}
+
+function currentPeriodTraffic(
+  rawUp: number,
+  rawDown: number,
+  period: TrafficPeriodState | undefined,
+): { up: number, down: number } {
+  if (!period?.enabled)
+    return { up: rawUp, down: rawDown }
+
+  const total = rawUp + rawDown
+  const used = Math.max(
+    period.used,
+    period.start > 0 && total >= period.base ? total - period.base : 0,
+  )
+  if (used <= 0 || total <= 0)
+    return { up: 0, down: Math.max(0, used) }
+
+  const up = Math.round(used * rawUp / total)
+  return { up, down: Math.max(0, used - up) }
 }
 
 function recordFromStatus(status: KomariNodeStatus): KomariStatusRecord {
@@ -272,12 +389,12 @@ function metricValue(record: KomariStatusRecord, metricKey: string): number | nu
     case 'disk.total': return record.disk_total
     case 'net.in.rate': return record.net_in
     case 'net.out.rate': return record.net_out
-    case 'net.total.down':
-    case 'traffic.down': return record.net_total_down
-    case 'net.total.up':
-    case 'traffic.up': return record.net_total_up
+    case 'net.total.down': return record.net_total_down
+    case 'traffic.down': return record.traffic_down
+    case 'net.total.up': return record.net_total_up
+    case 'traffic.up': return record.traffic_up
     case 'process.count': return record.process
-    case 'connections.tcp': return record.connections
+    case 'connections.tcp': return Math.max(0, record.connections - record.connections_udp)
     case 'connections.udp': return record.connections_udp
     default: return null
   }
@@ -290,7 +407,240 @@ function queryRange(
   const end = Number.isFinite(endCandidate) ? endCandidate : Date.now()
   const startCandidate = query.start ? Date.parse(query.start) : end - Math.max(1, query.hours ?? 1) * 3_600_000
   const start = Number.isFinite(startCandidate) ? startCandidate : end - 3_600_000
-  return start <= end ? { start, end } : { start: end, end: start }
+  const from = Math.min(start, end)
+  const to = Math.max(start, end)
+  return { start: Math.max(from, to - MAX_HISTORY_RANGE_MS), end: to }
+}
+
+function normalizeAggregation(value: string | undefined): MetricAggregation {
+  const normalized = (value ?? 'avg').trim().toLowerCase()
+    .replace(/^(average|mean)$/, 'avg')
+    .replace(/^(std_dev|stddev_pop|std_dev_pop)$/, 'stddev')
+  if (!METRIC_AGGREGATIONS.has(normalized))
+    throw new Error(`Unsupported metric aggregation: ${value}`)
+  return normalized as MetricAggregation
+}
+
+function metricAggregation(params: MetricQueryParams, metricKey: string): MetricAggregation {
+  const specific = params.aggregation_by_metric?.[metricKey]
+    ?? params.algorithm_by_metric?.[metricKey]
+  return normalizeAggregation(specific ?? params.aggregation ?? params.algorithm)
+}
+
+function metricMaxPoints(params: MetricQueryParams, metricKey: string): number {
+  const requested = params.max_points_by_metric?.[metricKey]
+    ?? params.points_by_metric?.[metricKey]
+    ?? params.max_points
+    ?? params.downsample_points
+    ?? DEFAULT_METRIC_POINTS
+  if (!Number.isInteger(requested) || requested <= 0)
+    throw new Error(`Max points for ${metricKey} must be a positive integer`)
+  return Math.min(requested, MAX_METRIC_POINTS)
+}
+
+function percentileValue(values: number[], percentile: number): number | null {
+  if (!values.length)
+    return null
+  const sorted = [...values].sort((left, right) => left - right)
+  const position = (sorted.length - 1) * percentile
+  const lower = Math.floor(position)
+  const upper = Math.ceil(position)
+  if (lower === upper)
+    return sorted[lower]!
+  return sorted[lower]! + (sorted[upper]! - sorted[lower]!) * (position - lower)
+}
+
+function aggregateMetricValue(points: MetricPoint[], aggregation: MetricAggregation): number | null {
+  const numeric = points.flatMap(point => typeof point.value === 'number' && Number.isFinite(point.value)
+    ? [point.value]
+    : [])
+  if (aggregation === 'count')
+    return numeric.length
+  if (!numeric.length)
+    return null
+  if (aggregation === 'sum')
+    return numeric.reduce((sum, value) => sum + value, 0)
+  if (aggregation === 'min')
+    return Math.min(...numeric)
+  if (aggregation === 'max')
+    return Math.max(...numeric)
+  if (aggregation === 'first')
+    return numeric[0]!
+  if (aggregation === 'last')
+    return numeric.at(-1)!
+  if (aggregation === 'p50')
+    return percentileValue(numeric, 0.5)
+  if (aggregation === 'p95')
+    return percentileValue(numeric, 0.95)
+  if (aggregation === 'p99')
+    return percentileValue(numeric, 0.99)
+  if (aggregation === 'stddev') {
+    const average = numeric.reduce((sum, value) => sum + value, 0) / numeric.length
+    return Math.sqrt(numeric.reduce((sum, value) => sum + (value - average) ** 2, 0) / numeric.length)
+  }
+  if (aggregation === 'rate') {
+    const numericPoints = points.filter((point): point is MetricPoint & { value: number } => (
+      typeof point.value === 'number' && Number.isFinite(point.value)
+    ))
+    if (numericPoints.length < 2)
+      return 0
+    let increase = 0
+    for (let index = 1; index < numericPoints.length; index += 1) {
+      const current = numericPoints[index]!.value
+      const previous = numericPoints[index - 1]!.value
+      increase += current >= previous ? current - previous : current
+    }
+    const seconds = (Date.parse(numericPoints.at(-1)!.time) - Date.parse(numericPoints[0]!.time)) / 1000
+    return seconds > 0 ? increase / seconds : 0
+  }
+  return numeric.reduce((sum, value) => sum + value, 0) / numeric.length
+}
+
+function visibleMetricValue(metricKey: string, value: number | null, fillEmpty: boolean): number | null {
+  return fillEmpty && metricKey.startsWith('ping.') && value === -1 ? null : value
+}
+
+function adaptivelyFillMetricPoints(
+  points: MetricPoint[],
+  metricKey: string,
+  start: number,
+  end: number,
+  fillEmpty: boolean,
+  expectedIntervalMs = 0,
+): { intervalSeconds?: number, points: MetricPoint[] } {
+  const visible = points.map(point => ({
+    ...point,
+    value: visibleMetricValue(metricKey, point.value, fillEmpty),
+    count: point.count ?? 1,
+  }))
+  if (!fillEmpty) {
+    return {
+      ...(expectedIntervalMs > 0 ? { intervalSeconds: expectedIntervalMs / 1_000 } : {}),
+      points: visible,
+    }
+  }
+
+  const timestamps = visible.map(point => Date.parse(point.time))
+  const deltas: number[] = []
+  for (let index = 1; index < timestamps.length; index += 1) {
+    const delta = timestamps[index]! - timestamps[index - 1]!
+    if (delta > 0)
+      deltas.push(delta)
+  }
+  if (deltas.length >= 2) {
+    deltas.sort((left, right) => left - right)
+    expectedIntervalMs = Math.max(expectedIntervalMs, deltas[Math.floor((deltas.length - 1) / 4)]!)
+  }
+
+  const filled: MetricPoint[] = []
+  if (!timestamps.length || start < timestamps[0]!)
+    filled.push({ time: new Date(start).toISOString(), value: null, count: 0 })
+  for (let index = 0; index < visible.length; index += 1) {
+    const point = visible[index]!
+    if (index > 0 && expectedIntervalMs > 0) {
+      const previous = visible[index - 1]!
+      const delta = timestamps[index]! - timestamps[index - 1]!
+      if (previous.value !== null && point.value !== null && delta > expectedIntervalMs * 1.5) {
+        filled.push({
+          time: new Date(timestamps[index - 1]! + expectedIntervalMs).toISOString(),
+          value: null,
+          count: 0,
+        })
+      }
+    }
+    filled.push(point)
+  }
+  if (!timestamps.length)
+    filled.push({ time: new Date(end).toISOString(), value: null, count: 0 })
+  return {
+    ...(expectedIntervalMs > 0 ? { intervalSeconds: expectedIntervalMs / 1_000 } : {}),
+    points: filled,
+  }
+}
+
+function downsampleMetricPoints(
+  points: MetricPoint[],
+  metricKey: string,
+  start: number,
+  end: number,
+  maxPoints: number,
+  aggregation: MetricAggregation,
+  fillEmpty: boolean,
+): { downsampled: boolean, intervalSeconds?: number, points: MetricPoint[] } {
+  const sorted = [...points].sort((left, right) => Date.parse(left.time) - Date.parse(right.time))
+  if (sorted.length <= maxPoints) {
+    const filled = adaptivelyFillMetricPoints(sorted, metricKey, start, end, fillEmpty)
+    return {
+      downsampled: false,
+      ...filled,
+    }
+  }
+
+  const intervalMs = Math.max(1_000, Math.ceil(Math.max(1, end - start) / maxPoints))
+  const bucketCount = Math.max(1, Math.min(maxPoints, Math.ceil(Math.max(1, end - start) / intervalMs)))
+  const buckets = new Map<number, MetricPoint[]>()
+  for (const point of sorted) {
+    const timestamp = Date.parse(point.time)
+    if (!Number.isFinite(timestamp))
+      continue
+    const bucket = Math.min(bucketCount - 1, Math.max(0, Math.floor((timestamp - start) / intervalMs)))
+    const values = buckets.get(bucket) ?? []
+    values.push(point)
+    buckets.set(bucket, values)
+  }
+
+  const sampled: MetricPoint[] = []
+  for (let bucket = 0; bucket < bucketCount; bucket += 1) {
+    const values = buckets.get(bucket)
+    if (!values?.length)
+      continue
+    sampled.push({
+      time: new Date(start + bucket * intervalMs).toISOString(),
+      value: aggregateMetricValue(values, aggregation),
+      count: values.reduce((count, point) => count + (point.count ?? 1), 0),
+    })
+  }
+  const filled = adaptivelyFillMetricPoints(sampled, metricKey, start, end, fillEmpty, intervalMs)
+  return {
+    downsampled: true,
+    ...filled,
+  }
+}
+
+function taskMatchesMetricQuery(row: TaskRow, params: MetricQueryParams): boolean {
+  const requestedTaskIds = [params.task_id, ...(params.task_ids ?? [])]
+    .filter(value => value !== undefined && value !== null && value !== '')
+    .map(String)
+  if (requestedTaskIds.length && !requestedTaskIds.includes(String(row.taskId)))
+    return false
+  const tags = params.tags ?? {}
+  for (const [key, value] of Object.entries(tags)) {
+    if (key === 'task_id' && String(row.taskId) !== value)
+      return false
+    if (key === 'task_name' && row.name !== value)
+      return false
+    if (key === 'task_type' && row.type !== value)
+      return false
+    if (!['task_id', 'task_name', 'task_type'].includes(key))
+      return false
+  }
+  return true
+}
+
+function inferredTaskInterval(rows: TaskRow[]): number {
+  const intervals: number[] = []
+  for (const clientRows of groupBy(rows, row => row.uuid).values()) {
+    const timestamps = [...new Set(clientRows.map(row => row.timestamp))].sort((left, right) => left - right)
+    for (let index = 1; index < timestamps.length; index += 1) {
+      const seconds = (timestamps[index]! - timestamps[index - 1]!) / 1000
+      if (seconds > 0 && Number.isFinite(seconds))
+        intervals.push(seconds)
+    }
+  }
+  if (!intervals.length)
+    return 20
+  intervals.sort((left, right) => left - right)
+  return Math.max(1, Math.round(intervals[Math.floor(intervals.length / 2)]!))
 }
 
 export class NodeGetSource {
@@ -298,6 +648,10 @@ export class NodeGetSource {
   readonly name: string
   private clientCache: Record<string, KomariClient> = {}
   private statusCache: Record<string, KomariNodeStatus> = {}
+  private latestRawTrafficCache: Record<string, RawTrafficState> = {}
+  private trafficPeriodCache: Record<string, TrafficPeriodState> = {}
+  private trafficPeriodExpiresAt = 0
+  private trafficPeriodRefreshPromise: Promise<void> | null = null
   private pingTaskCache: { expiresAt: number, tasks: KomariPingTask[] } | null = null
 
   constructor(
@@ -324,19 +678,10 @@ export class NodeGetSource {
     ])
 
     const statics = mapPayload(staticPayload)
-    const kvByNamespace: Record<string, Record<string, unknown>> = {}
-    for (const row of arrayPayload(kvPayload)) {
-      if (!isRecord(row))
-        continue
-      const namespace = stringValue(row.namespace)
-      const key = stringValue(row.key)
-      if (!namespace || !key)
-        continue
-      kvByNamespace[namespace] ??= {}
-      kvByNamespace[namespace]![key] = row.value
-    }
+    const kvByNamespace = kvPayloadByNamespace(kvPayload)
 
     const clients: Record<string, KomariClient> = {}
+    const trafficPeriods: Record<string, TrafficPeriodState> = {}
     for (const uuid of uuids) {
       const kv = kvByNamespace[uuid] ?? {}
       const staticData = statics[uuid] ?? {}
@@ -349,6 +694,7 @@ export class NodeGetSource {
       const expireTime = stringValue(parseJsonValue(kv.metadata_expire_time, ''))
       const physicalCores = finiteNumber(cpu.physical_cores)
       const traffic = trafficLimitMetadata(kv)
+      trafficPeriods[uuid] = trafficPeriodMetadata(kv)
 
       clients[uuid] = {
         uuid,
@@ -390,6 +736,8 @@ export class NodeGetSource {
     }
 
     this.clientCache = clients
+    this.trafficPeriodCache = trafficPeriods
+    this.trafficPeriodExpiresAt = Date.now() + TRAFFIC_PERIOD_CACHE_TTL_MS
     const statuses = await this.getLatestStatuses(uuids).catch(() => ({}))
     for (const [uuid, status] of Object.entries(statuses)) {
       const client = clients[uuid]
@@ -413,6 +761,8 @@ export class NodeGetSource {
     if (!ids.length)
       return {}
 
+    await this.refreshTrafficPeriodsIfNeeded(ids).catch(() => {})
+
     const payload = await this.rpc.call<unknown>('agent_dynamic_summary_multi_last_query', {
       uuids: ids,
       fields: DYNAMIC_FIELDS,
@@ -420,15 +770,47 @@ export class NodeGetSource {
     const dynamic = mapPayload(payload)
     const now = Date.now()
     const statuses: Record<string, KomariNodeStatus> = {}
-    for (const uuid of ids)
-      statuses[uuid] = this.toStatus(uuid, dynamic[uuid] ?? {}, now)
+    for (const uuid of ids) {
+      const row = dynamic[uuid]
+      if (!row && this.statusCache[uuid]) {
+        statuses[uuid] = { ...this.statusCache[uuid], online: false }
+        continue
+      }
+      const currentRow = row ?? {}
+      const rawTraffic = rawTrafficState(currentRow)
+      statuses[uuid] = this.toStatus(uuid, currentRow, now, this.latestRawTrafficCache[uuid], true)
+      if (rawTraffic.timestamp > 0)
+        this.latestRawTrafficCache[uuid] = rawTraffic
+    }
     this.statusCache = { ...this.statusCache, ...statuses }
     return statuses
   }
 
   async getRecentRecords(uuid: string, limit: number): Promise<KomariStatusRecord[]> {
-    const end = Date.now()
-    return this.queryHistoricalSummary(uuid, end - 3_600_000, end, Math.min(Math.max(limit, 1), 1_000))
+    const safeLimit = Math.min(Math.max(Math.trunc(limit) || 1, 1), 1_000)
+    const response = await this.rpc.call<unknown>('agent_query_dynamic_summary', {
+      query: {
+        condition: [{ uuid }, { limit: safeLimit + 1 }],
+        fields: DYNAMIC_FIELDS,
+      },
+    })
+    const unique = new Map<number, Record<string, unknown>>()
+    for (const candidate of arrayPayload(response)) {
+      if (!isRecord(candidate))
+        continue
+      const timestamp = timestampMs(candidate.timestamp ?? candidate.storage_time)
+      if (timestamp > 0)
+        unique.set(timestamp, candidate)
+    }
+
+    const records: KomariStatusRecord[] = []
+    let previousTraffic: RawTrafficState | undefined
+    for (const [, row] of [...unique.entries()].sort(([left], [right]) => left - right)) {
+      const status = this.toStatus(uuid, row, Number.MAX_SAFE_INTEGER, previousTraffic)
+      previousTraffic = rawTrafficState(row)
+      records.push(recordFromStatus(status))
+    }
+    return records.slice(-safeLimit)
   }
 
   async getLoadRecords(query: LoadRecordQuery): Promise<KomariStatusRecord[] | Record<string, KomariStatusRecord[]>> {
@@ -440,9 +822,12 @@ export class NodeGetSource {
         : await this.listAgentUuids()
     const entries = await Promise.all(ids.map(async uuid => [
       uuid,
-      await this.queryHistoricalSummary(uuid, start, end, query.maxCount),
+      await this.queryHistoricalSummary(uuid, start, end, query.uuid ? query.maxCount : -1),
     ] as const))
-    const records = Object.fromEntries(entries)
+    const grouped = query.uuid
+      ? new Map(entries)
+      : downsampleGroupsProportionally(new Map(entries), query.maxCount)
+    const records = Object.fromEntries(grouped)
     return query.uuid ? records[query.uuid] ?? [] : records
   }
 
@@ -458,7 +843,10 @@ export class NodeGetSource {
       time: new Date(row.timestamp).toISOString(),
       value: row.value,
     }))
-    const records = downsampleEvenly(fullRecords, query.maxCount)
+    const groupedRecords = groupBy(fullRecords, record => record.task_id)
+    const records = [...downsampleGroupsProportionally(groupedRecords, query.maxCount).values()]
+      .flat()
+      .sort((left, right) => Date.parse(left.time) - Date.parse(right.time))
     const tasks = this.tasksFromRows(filteredRows)
     const basicInfo = this.pingBasicInfo(fullRecords)
     return { count: records.length, records, tasks, basic_info: basicInfo }
@@ -478,44 +866,107 @@ export class NodeGetSource {
     return METRIC_DEFINITIONS.map(definition => ({ ...definition }))
   }
 
+  emptyMetricResult(params: MetricQueryParams, entityIds: string[]): MetricQueryResult {
+    const metricKeys = this.metricKeys(params)
+    const { start, end } = queryRange({
+      ...(params.start || params.start_time ? { start: params.start ?? params.start_time } : {}),
+      ...(params.end || params.end_time ? { end: params.end ?? params.end_time } : {}),
+      hours: params.hours ?? 4,
+    })
+    const fillEmpty = params.fill_empty === true
+    const series = [...new Set(entityIds.map(id => id.trim()).filter(Boolean))].flatMap(entityId => (
+      metricKeys.map((metricKey): MetricSeries => {
+        const definition = METRIC_DEFINITIONS.find(item => item.name === metricKey)!
+        metricAggregation(params, metricKey)
+        const maxPoints = metricMaxPoints(params, metricKey)
+        return {
+          metric_key: metricKey,
+          entity_id: entityId,
+          type: definition.type,
+          unit: definition.unit,
+          retention_days: definition.retention_days,
+          downsampled: false,
+          fill_empty: fillEmpty,
+          max_points: maxPoints,
+          count: fillEmpty ? 2 : 0,
+          points: fillEmpty
+            ? [
+                { time: new Date(start).toISOString(), value: null, count: 0 },
+                { time: new Date(end).toISOString(), value: null, count: 0 },
+              ]
+            : [],
+          tags: { ...(params.tags ?? {}) },
+        }
+      })
+    ))
+    return {
+      start: new Date(start).toISOString(),
+      end: new Date(end).toISOString(),
+      server_downsample_default: true,
+      default_points: DEFAULT_METRIC_POINTS,
+      series,
+      count: series.length,
+    }
+  }
+
   async queryMetrics(params: MetricQueryParams): Promise<MetricQueryResult> {
     const metricKeys = this.metricKeys(params)
     const { start, end } = queryRange({
       ...(params.start || params.start_time ? { start: params.start ?? params.start_time } : {}),
       ...(params.end || params.end_time ? { end: params.end ?? params.end_time } : {}),
-      ...(params.hours !== undefined ? { hours: params.hours } : {}),
+      hours: params.hours ?? 4,
     })
-    const maxPoints = Math.max(1, params.max_points ?? params.downsample_points ?? 500)
-    const entityIds = params.entity_ids?.length
+    const requestedEntityIds = params.entity_ids?.length
       ? params.entity_ids
       : params.entity_id
         ? [params.entity_id]
         : Object.keys(this.clientCache).length
           ? Object.keys(this.clientCache)
           : await this.listAgentUuids()
+    const entityIds = [...new Set(requestedEntityIds.map(id => id.trim()).filter(Boolean))]
 
     const series: MetricSeries[] = []
     const loadMetricKeys = metricKeys.filter(key => !key.startsWith('ping.'))
     if (loadMetricKeys.length) {
       await Promise.all(entityIds.map(async (uuid) => {
-        const records = await this.queryHistoricalSummary(uuid, start, end, maxPoints)
+        const records = Object.keys(params.tags ?? {}).length
+          ? []
+          : await this.queryHistoricalSummary(uuid, start, end, Number.MAX_SAFE_INTEGER)
         for (const metricKey of loadMetricKeys) {
           const definition = METRIC_DEFINITIONS.find(item => item.name === metricKey)
           if (!definition)
             continue
-          const points: MetricPoint[] = records.map(record => ({
+          const rawPoints: MetricPoint[] = records.map(record => ({
             time: record.time,
             value: metricValue(record, metricKey),
+            count: 1,
           }))
+          const aggregation = metricAggregation(params, metricKey)
+          const maxPoints = metricMaxPoints(params, metricKey)
+          const fillEmpty = params.fill_empty === true
+          const sampled = downsampleMetricPoints(
+            rawPoints,
+            metricKey,
+            start,
+            end,
+            maxPoints,
+            aggregation,
+            fillEmpty,
+          )
           series.push({
             metric_key: metricKey,
             entity_id: uuid,
             type: definition.type,
             unit: definition.unit,
-            downsampled: records.length >= maxPoints,
-            count: points.length,
-            points,
-            tags: {},
+            retention_days: definition.retention_days,
+            downsampled: sampled.downsampled,
+            ...(sampled.downsampled ? { downsample_algorithm: aggregation } : {}),
+            fill_empty: fillEmpty,
+            max_points: maxPoints,
+            ...(sampled.intervalSeconds === undefined ? {} : { interval_seconds: sampled.intervalSeconds }),
+            count: sampled.points.length,
+            points: sampled.points,
+            tags: { ...(params.tags ?? {}) },
           })
         }
       }))
@@ -524,34 +975,58 @@ export class NodeGetSource {
     const pingMetricKeys = metricKeys.filter(key => key.startsWith('ping.'))
     if (pingMetricKeys.length) {
       await Promise.all(entityIds.map(async (uuid) => {
-        const rows = await this.queryTaskRows(uuid, start, end)
+        const rows = (await this.queryTaskRows(uuid, start, end))
+          .filter(row => taskMatchesMetricQuery(row, params))
         const byTask = groupBy(rows, row => `${row.taskId}\u0000${row.name}`)
+        if (!byTask.size) {
+          series.push(...this.emptyMetricResult({ ...params, metric_keys: pingMetricKeys }, [uuid]).series)
+          return
+        }
         for (const taskRows of byTask.values()) {
           const first = taskRows[0]
           if (!first)
             continue
-          const sampled = downsampleEvenly(taskRows, maxPoints)
-          const tags = { task_id: String(first.taskId), task_name: first.name, task_type: first.type }
-          if (pingMetricKeys.includes('ping.latency_ms')) {
-            const points = sampled.map(row => ({
-              time: new Date(row.timestamp).toISOString(),
-              value: row.value >= 0 ? row.value : null,
-              count: 1,
-            }))
-            series.push({
-              metric_key: 'ping.latency_ms', entity_id: uuid, type: 'gauge', unit: 'ms',
-              downsampled: taskRows.length > sampled.length, count: points.length, points, tags,
-            })
+          const tags = {
+            task_id: String(first.taskId),
+            task_name: first.name,
+            task_type: first.type,
+            task_interval: String(inferredTaskInterval(taskRows)),
           }
-          if (pingMetricKeys.includes('ping.loss')) {
-            const points = sampled.map(row => ({
+          for (const metricKey of pingMetricKeys) {
+            const definition = METRIC_DEFINITIONS.find(item => item.name === metricKey)
+            if (!definition)
+              continue
+            const rawPoints: MetricPoint[] = taskRows.map(row => ({
               time: new Date(row.timestamp).toISOString(),
-              value: row.value < 0 ? 1 : 0,
+              value: metricKey === 'ping.loss' ? (row.value < 0 ? 1 : 0) : row.value,
               count: 1,
             }))
+            const aggregation = metricAggregation(params, metricKey)
+            const maxPoints = metricMaxPoints(params, metricKey)
+            const fillEmpty = params.fill_empty === true
+            const sampled = downsampleMetricPoints(
+              rawPoints,
+              metricKey,
+              start,
+              end,
+              maxPoints,
+              aggregation,
+              fillEmpty,
+            )
             series.push({
-              metric_key: 'ping.loss', entity_id: uuid, type: 'gauge', unit: 'ratio',
-              downsampled: taskRows.length > sampled.length, count: points.length, points, tags,
+              metric_key: metricKey,
+              entity_id: uuid,
+              type: definition.type,
+              unit: definition.unit,
+              retention_days: definition.retention_days,
+              downsampled: sampled.downsampled,
+              ...(sampled.downsampled ? { downsample_algorithm: aggregation } : {}),
+              fill_empty: fillEmpty,
+              max_points: maxPoints,
+              ...(sampled.intervalSeconds === undefined ? {} : { interval_seconds: sampled.intervalSeconds }),
+              count: sampled.points.length,
+              points: sampled.points,
+              tags,
             })
           }
         }
@@ -563,6 +1038,8 @@ export class NodeGetSource {
     return {
       start: new Date(start).toISOString(),
       end: new Date(end).toISOString(),
+      server_downsample_default: true,
+      default_points: DEFAULT_METRIC_POINTS,
       series,
       count: series.length,
     }
@@ -591,13 +1068,63 @@ export class NodeGetSource {
       .sort()
   }
 
-  private toStatus(uuid: string, dynamic: Record<string, unknown>, now: number): KomariNodeStatus {
+  private async refreshTrafficPeriodsIfNeeded(requestedIds: string[]): Promise<void> {
+    if (this.trafficPeriodExpiresAt > Date.now())
+      return
+    if (!this.trafficPeriodRefreshPromise) {
+      const cachedIds = Object.keys(this.clientCache)
+      const ids = [...new Set((cachedIds.length ? cachedIds : requestedIds).filter(Boolean))]
+      this.trafficPeriodRefreshPromise = this.loadTrafficPeriods(ids)
+        .then((periods) => {
+          const merged = { ...this.trafficPeriodCache }
+          for (const [uuid, period] of Object.entries(periods)) {
+            const previous = merged[uuid]
+            merged[uuid] = previous?.enabled && period.enabled && previous.start === period.start
+              ? { ...period, used: Math.max(previous.used, period.used) }
+              : period
+          }
+          this.trafficPeriodCache = merged
+          this.trafficPeriodExpiresAt = Date.now() + TRAFFIC_PERIOD_CACHE_TTL_MS
+        })
+        .catch((error) => {
+          this.trafficPeriodExpiresAt = Date.now() + TRAFFIC_PERIOD_RETRY_MS
+          throw error
+        })
+        .finally(() => {
+          this.trafficPeriodRefreshPromise = null
+        })
+    }
+    await this.trafficPeriodRefreshPromise
+  }
+
+  private async loadTrafficPeriods(uuids: string[]): Promise<Record<string, TrafficPeriodState>> {
+    if (!uuids.length)
+      return {}
+    const namespaceKeys = uuids.flatMap(uuid => TRAFFIC_PERIOD_METADATA_KEYS.map(key => ({ namespace: uuid, key })))
+    const payload = await this.rpc.call<unknown>('kv_get_multi_value', { namespace_key: namespaceKeys })
+    const kvByNamespace = kvPayloadByNamespace(payload)
+    return Object.fromEntries(uuids.map(uuid => [uuid, trafficPeriodMetadata(kvByNamespace[uuid] ?? {})]))
+  }
+
+  private toStatus(
+    uuid: string,
+    dynamic: Record<string, unknown>,
+    now: number,
+    previousTraffic?: RawTrafficState,
+    applyTrafficPeriod = false,
+  ): KomariNodeStatus {
     const timestamp = timestampMs(dynamic.timestamp ?? dynamic.storage_time)
     const ramTotal = firstFiniteValue(dynamic, ['total_memory'])
     const swapTotal = firstFiniteValue(dynamic, ['total_swap'])
     const diskTotal = firstFiniteValue(dynamic, ['total_space'])
     const diskUsed = Math.max(0, diskTotal - firstFiniteValue(dynamic, ['available_space']))
     const time = new Date(timestamp || 0).toISOString()
+    const rawTraffic = rawTrafficState(dynamic)
+    const tcpConnections = Math.max(0, firstFiniteValue(dynamic, ['tcp_connections']))
+    const udpConnections = Math.max(0, firstFiniteValue(dynamic, ['udp_connections']))
+    const totals = applyTrafficPeriod
+      ? currentPeriodTraffic(rawTraffic.up, rawTraffic.down, this.trafficPeriodCache[uuid])
+      : { up: rawTraffic.up, down: rawTraffic.down }
 
     return {
       client: uuid,
@@ -616,13 +1143,13 @@ export class NodeGetSource {
       disk_total: diskTotal,
       net_in: firstFiniteValue(dynamic, ['receive_speed']),
       net_out: firstFiniteValue(dynamic, ['transmit_speed']),
-      net_total_up: firstFiniteValue(dynamic, ['total_transmitted']),
-      net_total_down: firstFiniteValue(dynamic, ['total_received']),
-      traffic_up: firstFiniteValue(dynamic, ['total_transmitted']),
-      traffic_down: firstFiniteValue(dynamic, ['total_received']),
+      net_total_up: totals.up,
+      net_total_down: totals.down,
+      traffic_up: trafficDelta(rawTraffic, previousTraffic, 'up'),
+      traffic_down: trafficDelta(rawTraffic, previousTraffic, 'down'),
       process: firstFiniteValue(dynamic, ['process_count']),
-      connections: firstFiniteValue(dynamic, ['tcp_connections']),
-      connections_udp: firstFiniteValue(dynamic, ['udp_connections']),
+      connections: tcpConnections + udpConnections,
+      connections_udp: udpConnections,
       online: timestamp > 0 && now - timestamp < 30_000,
       uptime: firstFiniteValue(dynamic, ['uptime']),
       updated_at: time,
@@ -637,10 +1164,13 @@ export class NodeGetSource {
   ): Promise<KomariStatusRecord[]> {
     const windows: Array<{ from: number, to: number }> = []
     const windowMs = 2 * 3_600_000
-    for (let from = start; from < end; from += windowMs)
+    const fetchStart = Math.max(0, start - TRAFFIC_PREDECESSOR_LOOKBACK_MS)
+    for (let from = fetchStart; from < end; from += windowMs)
       windows.push({ from, to: Math.min(end, from + windowMs) })
 
     const rows: Record<string, unknown>[] = []
+    let successfulQueries = 0
+    let firstFailure: unknown
     for (let index = 0; index < windows.length; index += 4) {
       const batch = windows.slice(index, index + 4).map(({ from, to }) => this.rpc.call<unknown>(
         'agent_query_dynamic_summary',
@@ -650,24 +1180,37 @@ export class NodeGetSource {
             fields: DYNAMIC_FIELDS,
           },
         },
-      ).catch(() => []))
-      for (const response of await Promise.all(batch)) {
+      ))
+      for (const result of await Promise.allSettled(batch)) {
+        if (result.status === 'rejected') {
+          firstFailure ??= result.reason
+          continue
+        }
+        successfulQueries += 1
+        const response = result.value
         for (const row of arrayPayload(response)) {
           if (isRecord(row))
             rows.push(row)
         }
       }
     }
+    if (windows.length && successfulQueries === 0)
+      throw firstFailure ?? new Error('NodeGet historical query failed')
 
     const unique = new Map<number, Record<string, unknown>>()
     for (const row of rows) {
       const timestamp = timestampMs(row.timestamp ?? row.storage_time)
-      if (timestamp >= start && timestamp <= end)
+      if (timestamp >= fetchStart && timestamp <= end)
         unique.set(timestamp, row)
     }
-    const records = [...unique.entries()]
-      .sort(([left], [right]) => left - right)
-      .map(([, row]) => recordFromStatus(this.toStatus(uuid, row, Number.MAX_SAFE_INTEGER)))
+    const records: KomariStatusRecord[] = []
+    let previousTraffic: RawTrafficState | undefined
+    for (const [timestamp, row] of [...unique.entries()].sort(([left], [right]) => left - right)) {
+      const status = this.toStatus(uuid, row, Number.MAX_SAFE_INTEGER, previousTraffic)
+      previousTraffic = rawTrafficState(row)
+      if (timestamp >= start)
+        records.push(recordFromStatus(status))
+    }
     return downsampleEvenly(records, maxCount)
   }
 
@@ -678,6 +1221,8 @@ export class NodeGetSource {
       windows.push({ from, to: Math.min(end, from + windowMs) })
 
     const rawRows: RawTaskRow[] = []
+    let successfulQueries = 0
+    let firstFailure: unknown
     for (let index = 0; index < windows.length; index += 4) {
       const batch = windows.slice(index, index + 4).flatMap(({ from, to }) => ['ping', 'tcp_ping'].map((type) => {
         const condition: Record<string, unknown>[] = []
@@ -686,16 +1231,23 @@ export class NodeGetSource {
         condition.push({ type }, { timestamp_from: from }, { timestamp_to: to }, { limit: 10_000 })
         return this.rpc.call<unknown>('task_query', { task_data_query: { condition } })
           .then(response => ({ requestedType: type, response }))
-          .catch(() => ({ requestedType: type, response: [] }))
       }))
 
-      for (const { requestedType, response } of await Promise.all(batch)) {
+      for (const result of await Promise.allSettled(batch)) {
+        if (result.status === 'rejected') {
+          firstFailure ??= result.reason
+          continue
+        }
+        successfulQueries += 1
+        const { requestedType, response } = result.value
         for (const row of arrayPayload(response)) {
           if (isRecord(row))
             rawRows.push({ row, requestedType })
         }
       }
     }
+    if (windows.length && successfulQueries === 0)
+      throw firstFailure ?? new Error('NodeGet task query failed')
 
     const unique = new Map<string, TaskRow>()
     for (const { row, requestedType } of rawRows) {
@@ -715,7 +1267,9 @@ export class NodeGetSource {
         : typeof result.ping === 'number'
           ? 'ping'
           : requestedType
-      const name = stringValue(row.cron_source ?? row.task_name, type)
+      const taskEvent = isRecord(row.task_event_type) ? row.task_event_type : {}
+      const target = stringValue(taskEvent[type])
+      const name = stringValue(row.cron_source ?? row.task_name, target || type)
       const taskId = stablePositiveId(`${this.key}\u0000${type}\u0000${name}`)
       unique.set(`${rowUuid}\u0000${taskId}\u0000${timestamp}`, {
         uuid: rowUuid,
@@ -743,7 +1297,7 @@ export class NodeGetSource {
         clients: [...new Set(taskRows.map(row => row.uuid))].sort(),
         default_on: true,
         type: first.type,
-        interval: 20,
+        interval: inferredTaskInterval(taskRows),
         loss,
         ...(valid.length
           ? {
@@ -775,6 +1329,12 @@ export class NodeGetSource {
       ?? params.metrics
       ?? (params.metric_key ? [params.metric_key] : [])
     const supported = new Set(METRIC_DEFINITIONS.map(definition => definition.name))
-    return [...new Set(requested)].filter(key => supported.has(key))
+    const keys = [...new Set(requested.map(key => key.trim()).filter(Boolean))]
+    if (!keys.length)
+      throw new Error('metric_keys is required')
+    const unknown = keys.find(key => !supported.has(key))
+    if (unknown)
+      throw new Error(`Unknown metric key: ${unknown}`)
+    return keys
   }
 }

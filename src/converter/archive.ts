@@ -1,7 +1,7 @@
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
 import type { ThemeAppearance } from './appearance'
 import { isThemeTextAsset, rewriteThemeAppearanceText } from './appearance'
-import { injectCompatibilityRuntime } from './html'
+import { injectCompatibilityRuntime, rewriteLocalThemeAssetReferences } from './html'
 import { convertManifests, parseKomariManifest, previewOutputName } from './manifest'
 
 export const MAX_INPUT_BYTES = 100 * 1024 * 1024
@@ -112,6 +112,17 @@ function prettyJson(value: unknown): Uint8Array {
   return strToU8(`${JSON.stringify(value, null, 2)}\n`)
 }
 
+function rewriteConvertedText(
+  source: string,
+  themeShort: string,
+  appearance: ThemeAppearance | undefined,
+): string {
+  return rewriteThemeAppearanceText(
+    rewriteLocalThemeAssetReferences(source, themeShort),
+    appearance,
+  )
+}
+
 function sourceWarnings(entries: Record<string, Uint8Array>, themeShort: string): string[] {
   const warnings: string[] = []
   const textExtensions = new Set(['.html', '.js', '.mjs', '.css', '.json'])
@@ -120,8 +131,6 @@ function sourceWarnings(entries: Record<string, Uint8Array>, themeShort: string)
     if (!textExtensions.has(extension) || content.byteLength > 10 * 1024 * 1024)
       continue
     const text = strFromU8(content)
-    if (text.includes(`/themes/${themeShort}/`))
-      warnings.push(`${path} contains an absolute /themes/${themeShort}/ path that may need theme-specific rewriting.`)
     if (text.includes('/api/admin/') || text.includes('admin:'))
       warnings.push(`${path} references Komari administrative APIs; those features will remain disabled.`)
   }
@@ -160,13 +169,13 @@ export function convertThemeEntries(
       const outputPath = path.slice('dist/'.length)
       if (outputPath)
         output[outputPath] = isThemeTextAsset(outputPath)
-          ? strToU8(rewriteThemeAppearanceText(strFromU8(content), options.appearance))
+          ? strToU8(rewriteConvertedText(strFromU8(content), manifest.short, options.appearance))
           : content
       continue
     }
     if (path !== 'komari-theme.json')
       output[path] = isThemeTextAsset(path)
-        ? strToU8(rewriteThemeAppearanceText(strFromU8(content), options.appearance))
+        ? strToU8(rewriteConvertedText(strFromU8(content), manifest.short, options.appearance))
         : content
   }
 

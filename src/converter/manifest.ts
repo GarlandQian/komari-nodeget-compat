@@ -50,6 +50,7 @@ export interface ConvertManifestOptions {
 }
 
 const STANDARD_KEYS = new Set(['site_name', 'site_title', 'site_description', 'footer'])
+const UNSAFE_SETTING_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
 const DIRECT_TYPES = new Set(['string', 'number', 'select', 'switch', 'title'])
 const ARRAY_TYPES = new Set(['nodes', 'pingtasks'])
 
@@ -117,6 +118,10 @@ export function convertManifests(
     const key = item.key?.trim()
     if (!key) {
       warnings.push(`Ignored configuration item "${name}" because it has no key.`)
+      continue
+    }
+    if (UNSAFE_SETTING_KEYS.has(key)) {
+      warnings.push(`Ignored unsafe configuration key "${key}".`)
       continue
     }
     if (seenKeys.has(key)) {

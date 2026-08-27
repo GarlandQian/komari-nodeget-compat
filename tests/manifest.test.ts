@@ -44,4 +44,20 @@ describe('manifest conversion', () => {
     expect(converted.compat.themeSettingKeys).toEqual(['same'])
     expect(converted.warnings).toHaveLength(2)
   })
+
+  it('rejects prototype-mutating theme setting keys', () => {
+    const converted = convertManifests({
+      name: 'Test',
+      short: 'Test',
+      configuration: {
+        data: [
+          { key: '__proto__', type: 'string', name: 'Unsafe', default: { polluted: true } },
+          { key: 'constructor', type: 'string', name: 'Unsafe 2', default: 'x' },
+        ],
+      },
+    })
+    expect(converted.compat.themeSettingKeys).toEqual([])
+    expect(converted.warnings.every(warning => warning.includes('unsafe'))).toBe(true)
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined()
+  })
 })
