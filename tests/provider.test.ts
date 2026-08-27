@@ -65,6 +65,7 @@ describe('NodeGetMonitorProvider', () => {
 
   it('automatically exposes stored homepage Ping bindings from scoped task queries when bindings are empty', async () => {
     const uuid = '77777777-7777-4777-8777-777777777777'
+    const taskConditions: Array<Array<Record<string, unknown>>> = []
     const caller: NodeGetCaller = {
       async call<T>(method: string, params?: Record<string, unknown>): Promise<T> {
         if (method === 'agent-uuid_list_all')
@@ -77,6 +78,7 @@ describe('NodeGetMonitorProvider', () => {
           return [{ uuid, timestamp: Date.now(), total_memory: 1_000, total_space: 2_000 }] as T
         if (method === 'task_query') {
           const condition = (params?.task_data_query as { condition: Array<Record<string, unknown>> }).condition
+          taskConditions.push(condition)
           if (!condition.some(item => item.uuid === uuid))
             throw new Error('global task query denied')
           const type = condition.find(item => item.type)?.type
@@ -102,6 +104,9 @@ describe('NodeGetMonitorProvider', () => {
     const info = await provider.getPublicInfo()
     const bindings = info.theme_settings.homepagePingBindings as Record<string, string[]>
     expect(Object.values(bindings)).toEqual([[uuid]])
+    expect(taskConditions.length).toBeGreaterThan(0)
+    expect(taskConditions.every(condition => condition.some(item => Object.hasOwn(item, 'last')))).toBe(true)
+    expect(taskConditions.every(condition => condition.every(item => !Object.hasOwn(item, 'timestamp_from_to')))).toBe(true)
   })
 
   it('preserves explicit homepage Ping bindings without requiring Ping permission', async () => {

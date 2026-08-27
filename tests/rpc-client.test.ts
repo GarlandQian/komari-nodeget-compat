@@ -147,4 +147,56 @@ describe('NodeGetRpcClient', () => {
     await expect(client.call('cancelled', {}, { signal: controller.signal })).rejects.toHaveProperty('name', 'AbortError')
     expect(connections).toBe(0)
   })
+
+  it('releases an idle backend socket and reconnects for a later query batch', async () => {
+    const sockets: FakeSocket[] = []
+    const client = new NodeGetRpcClient(
+      { backend_url: 'wss://nodeget.example', token: 'read-only-token' },
+      () => {
+        const socket = new FakeSocket()
+        sockets.push(socket)
+        return socket
+      },
+      5,
+    )
+
+    expect(await client.call<string>('first')).toBe('ok')
+    expect(sockets).toHaveLength(1)
+    await Bun.sleep(15)
+    expect(sockets[0]?.readyState).toBe(WebSocket.CLOSED)
+
+    expect(await client.call<string>('second')).toBe('ok')
+    expect(sockets).toHaveLength(2)
+    client.close()
+  })
+
+  it('keeps a shared socket open until every concurrent request completes', async () => {
+    const socket = new ManualSocket()
+    const client = new NodeGetRpcClient(
+      { backend_url: 'wss://nodeget.example', token: 'read-only-token' },
+      () => socket,
+      5,
+    )
+
+    const first = client.call<string>('first')
+    const second = client.call<string>('second')
+    await Promise.resolve()
+    socket.open()
+    while (socket.sent.length < 2)
+      await Promise.resolve()
+    socket.onmessage?.(new MessageEvent('message', {
+      data: JSON.stringify({ jsonrpc: '2.0', id: socket.sent[0].id, result: 'first-ok' }),
+    }))
+    expect(await first).toBe('first-ok')
+    await Bun.sleep(15)
+    expect(socket.readyState).toBe(WebSocket.OPEN)
+
+    socket.onmessage?.(new MessageEvent('message', {
+      data: JSON.stringify({ jsonrpc: '2.0', id: socket.sent[1].id, result: 'second-ok' }),
+    }))
+    expect(await second).toBe('second-ok')
+    await Bun.sleep(15)
+    expect(socket.readyState).toBe(WebSocket.CLOSED)
+    client.close()
+  })
 })

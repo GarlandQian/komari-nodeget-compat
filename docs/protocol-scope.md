@@ -14,7 +14,7 @@
 - WebSocket `/api/clients`
 - 公共节点、最新状态、历史记录、Metric Store 和 Ping RPC
 
-Metric Store 支持每指标聚合方式、每指标最大点数、标签过滤、空区间边界/断点、全局比例抽样和 30 天保留范围。`traffic.up` / `traffic.down` 表示相邻 Agent 采样之间的增量；`net.total.up` / `net.total.down` 始终表示 NodeGet Agent 上报的累计量。`extension-traffic` 只负责把 GB 配额转换为 Komari 使用的字节配额。
+Metric Store 支持每指标聚合方式、每指标最大点数、标签过滤、空区间边界/断点、全局比例抽样和 30 天保留范围。`traffic.up` / `traffic.down` 表示相邻 Agent 采样之间的增量；`net.total.up` / `net.total.down` 表示累计量，启用 `extension-traffic` 配额时改为当前周期用量。
 
 多个 NodeGet 数据源并行读取。单个数据源暂时失败时保留其他来源的数据；全部来源失败时返回错误，不把权限或网络故障伪装成空数据。重复原始 UUID 会生成稳定公开 ID，数据源离线再恢复时不会改变。
 
