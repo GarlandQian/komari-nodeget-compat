@@ -29,4 +29,5 @@
 
 - NodeGet 当前摘要协议没有系统温度、GPU 设备详情、GPU 显存和 GPU 温度，相关图表会隐藏或显示不可用。
 - `extension-traffic` 配额模式能精确提供当前周期总用量；上下行方向只能按原始累计流量比例拆分。
+- LuminaPlus 未显式保存 `homepagePingBindings` 时，适配层会把每个节点自动绑定到一个最近有真实样本的 Ping/TCPing 任务；显式绑定始终优先，不生成模拟延迟。
 - 远程主题的源 JS、CSS、图片和字体依赖 Worker/R2；完全离线使用应选择本地 ZIP 转换。

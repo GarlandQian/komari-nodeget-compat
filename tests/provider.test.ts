@@ -63,6 +63,61 @@ describe('NodeGetMonitorProvider', () => {
     expect(info.theme_settings).not.toHaveProperty('metric_retention_days')
   })
 
+  it('automatically binds LuminaPlus nodes to real homepage Ping tasks', async () => {
+    const uuid = '77777777-7777-4777-8777-777777777777'
+    const caller: NodeGetCaller = {
+      async call<T>(method: string, params?: Record<string, unknown>): Promise<T> {
+        if (method === 'agent-uuid_list_all')
+          return [uuid] as T
+        if (method === 'agent_static_data_multi_last_query')
+          return [] as T
+        if (method === 'kv_get_multi_value')
+          return [{ namespace: uuid, key: 'metadata_name', value: 'Lumina node' }] as T
+        if (method === 'agent_dynamic_summary_multi_last_query')
+          return [{ uuid, timestamp: Date.now(), total_memory: 1_000, total_space: 2_000 }] as T
+        if (method === 'task_query') {
+          const condition = (params?.task_data_query as { condition: Array<Record<string, unknown>> }).condition
+          const type = condition.find(item => item.type)?.type
+          return (type === 'ping'
+            ? [{
+                uuid,
+                timestamp: Date.now() - 1_000,
+                success: true,
+                cron_source: 'Homepage Ping',
+                task_event_result: { ping: 18 },
+              }]
+            : []) as T
+        }
+        throw new Error(`Unexpected method: ${method}`)
+      },
+      close() {},
+    }
+    const provider = new NodeGetMonitorProvider({
+      site_tokens: [{ name: 'Only', backend_url: 'https://only.example', token: 'token' }],
+    }, {
+      ...manifest,
+      source: { name: 'Komari-Theme-LuminaPlus', short: 'LuminaPlus', version: '1.2.9' },
+    }, () => caller)
+
+    const info = await provider.getPublicInfo()
+    const bindings = info.theme_settings.homepagePingBindings as Record<string, string[]>
+    expect(Object.values(bindings)).toEqual([[uuid]])
+  })
+
+  it('preserves explicit LuminaPlus Ping bindings without requiring Ping permission', async () => {
+    const configured = { 42: ['saved-node'] }
+    const provider = new NodeGetMonitorProvider({
+      user_preferences: { homepagePingBindings: configured },
+      site_tokens: [],
+    }, {
+      ...manifest,
+      source: { name: 'Komari-Theme-LuminaPlus', short: 'LuminaPlus', version: '1.2.9' },
+    })
+
+    const info = await provider.getPublicInfo()
+    expect(info.theme_settings.homepagePingBindings).toEqual(configured)
+  })
+
   it('keeps healthy NodeGet sources available when another source is offline', async () => {
     const uuid = '22222222-2222-4222-8222-222222222222'
     const healthy: NodeGetCaller = {
