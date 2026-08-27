@@ -136,7 +136,7 @@ ACG_BACKGROUND_ENABLED=true
 
 背景来自 [夜轻随机二次元图片 API](https://blog.yeqing.net/acg-api/)。开启后，Worker 通过固定的 `/api/acg-background` 接口代理图片，并同时写入 Glassmorphism/GlassOps 使用的 `backgroundEnabled`、`lightBackgroundUrl`、`darkBackgroundUrl` 以及 LuminaPlus 使用的 `backgroundMediaType`、`backgroundImage`、`backgroundImageMobile`；关闭时不会请求上游。图片本身不进入仓库、R2 或转换产物，该服务不保证 SLA，转换器始终保留纯色回退。
 
-已经安装的主题不会因环境变量变化而被静默改写。开启后请从远程更新并选择覆盖 `config.json`，或在 NodeGet 主题设置中手动启用背景并填写：
+已经安装的主题不会因环境变量变化而被静默改写。开启后请在 NodeGet 中执行“从远程更新”，并在更新选项中选择“主题配置（user_preferences） -> 采用新配置”和“Token（site_tokens） -> 保留旧配置”。这样会载入 ACG 默认值，同时保留现有服务器授权；不要把 Token 选为“采用新配置”，因为公开转换包故意提供空的 `site_tokens`。也可以保留全部旧配置，然后在主题设置中手动启用背景并填写：
 
 ```text
 https://<WORKER_DOMAIN>/api/acg-background

@@ -45,7 +45,7 @@ Worker 调用 GitHub `releases/latest` 获取最新正式 Release。公共 GitHu
 4. 为 NodeGet 生成少量本地安装文件，并把源主题静态资源改写到固定 Release 地址。
 5. 按文件偏移使用 R2 Range 响应 NodeGet 和浏览器请求。
 
-`latest/config.json` 会按当前部署环境动态加入可选 ACG 背景默认值；主题 Logo 指向同一 Worker 的 `/nodeget-logo.png`。因此修改开关后需要重新远程更新配置，而替换 Logo 文件只需重新部署 Worker。
+`latest/config.json` 会按当前部署环境动态加入可选 ACG 背景默认值；主题 Logo 指向同一 Worker 的 `/nodeget-logo.png`。因此修改开关后需要重新远程更新配置，而替换 Logo 文件只需重新部署 Worker。更新 ACG 配置时应选择采用新的 `user_preferences`、保留旧的 `site_tokens`，避免公开包中的空 Token 数组覆盖已有服务器授权。
 
 最新 Release 默认每 300 秒重新检查一次，可用 `RELEASE_CHECK_TTL_SECONDS` 调整到 60 至 86400 秒。GitHub 临时不可用时，如果 R2 已有缓存，会继续提供上一次成功版本。
 
