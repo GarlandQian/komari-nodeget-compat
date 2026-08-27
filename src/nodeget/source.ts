@@ -58,6 +58,7 @@ const TRAFFIC_EXTENSION_BILLING_MODES = new Set(['quota', 'payg'])
 const TRAFFIC_EXTENSION_PERIODS = new Set(['hourly', 'daily', 'weekly', 'monthly', 'never'])
 const TRAFFIC_PERIOD_CACHE_TTL_MS = 60_000
 const TRAFFIC_PERIOD_RETRY_MS = 15_000
+const PING_TASK_DISCOVERY_WINDOW_MS = 6 * 3_600_000
 const TRAFFIC_LIMIT_TYPES = new Set(['sum', 'max', 'min', 'up', 'down'])
 const METRIC_AGGREGATIONS = new Set([
   'avg',
@@ -357,6 +358,11 @@ function currentPeriodTraffic(
   period: TrafficPeriodState | undefined,
 ): { up: number, down: number } {
   if (!period?.enabled)
+    return { up: rawUp, down: rawDown }
+
+  // The extension quota can be configured before its reset worker initializes
+  // the current-period baseline. Preserve NodeGet's real counters until then.
+  if (period.start <= 0 && period.used <= 0)
     return { up: rawUp, down: rawDown }
 
   const total = rawUp + rawDown
@@ -856,7 +862,38 @@ export class NodeGetSource {
     if (this.pingTaskCache && this.pingTaskCache.expiresAt > Date.now())
       return this.pingTaskCache.tasks
     const end = Date.now()
-    const rows = await this.queryTaskRows(undefined, end - 24 * 3_600_000, end)
+    const start = end - 24 * 3_600_000
+    const uuids = Object.keys(this.clientCache).length
+      ? Object.keys(this.clientCache)
+      : await this.listAgentUuids()
+    let rows: TaskRow[] = []
+    let globalQuerySucceeded = false
+    let globalFailure: unknown
+    try {
+      rows = await this.queryTaskRows(undefined, start, end, PING_TASK_DISCOVERY_WINDOW_MS)
+      globalQuerySucceeded = true
+    }
+    catch (error) {
+      globalFailure = error
+    }
+
+    const coveredUuids = new Set(rows.map(row => row.uuid))
+    const missingUuids = uuids.filter(uuid => !coveredUuids.has(uuid))
+    let scopedQuerySucceeded = false
+    for (let index = 0; index < missingUuids.length; index += 4) {
+      const results = await Promise.allSettled(missingUuids.slice(index, index + 4).map(uuid => (
+        this.queryTaskRows(uuid, start, end, end - start)
+      )))
+      for (const result of results) {
+        if (result.status !== 'fulfilled')
+          continue
+        scopedQuerySucceeded = true
+        rows.push(...result.value)
+      }
+    }
+    if (!globalQuerySucceeded && !scopedQuerySucceeded)
+      throw globalFailure ?? new Error('NodeGet task query failed')
+
     const tasks = this.tasksFromRows(rows)
     this.pingTaskCache = { expiresAt: Date.now() + 60_000, tasks }
     return tasks
@@ -1214,9 +1251,13 @@ export class NodeGetSource {
     return downsampleEvenly(records, maxCount)
   }
 
-  private async queryTaskRows(uuid: string | undefined, start: number, end: number): Promise<TaskRow[]> {
+  private async queryTaskRows(
+    uuid: string | undefined,
+    start: number,
+    end: number,
+    windowMs = 3_600_000,
+  ): Promise<TaskRow[]> {
     const windows: Array<{ from: number, to: number }> = []
-    const windowMs = 3_600_000
     for (let from = start; from < end; from += windowMs)
       windows.push({ from, to: Math.min(end, from + windowMs) })
 

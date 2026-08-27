@@ -261,7 +261,7 @@ describe('remote NodeGet theme distribution', () => {
     expect(calls).toEqual({ api: 1, asset: 1 })
     expect(bucket.puts).toBe(3)
     expect([...bucket.objects.keys()].some(key => key.endsWith('/theme.pack'))).toBe(true)
-    expect([...bucket.objects.keys()].some(key => key.includes('/compat-v2/'))).toBe(true)
+    expect([...bucket.objects.keys()].some(key => key.includes('/compat-v3/'))).toBe(true)
     const alias = JSON.parse(await new MemoryObject(bucket.objects.get('aliases/github/test-owner/test-theme/latest.json')!).text())
     expect(alias.schema).toBe(2)
   })
@@ -294,7 +294,7 @@ describe('remote NodeGet theme distribution', () => {
     )
     expect(response?.status).toBe(200)
     expect(calls).toEqual({ api: 1, asset: 1 })
-    expect([...bucket.objects.keys()].some(key => key.includes('/compat-v2/theme.pack'))).toBe(true)
+    expect([...bucket.objects.keys()].some(key => key.includes('/compat-v3/theme.pack'))).toBe(true)
   })
 
   it('returns a stable NodeGet import address without starting a conversion', async () => {

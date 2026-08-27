@@ -143,6 +143,25 @@ describe('NodeGetSource', () => {
     })
   })
 
+  it('keeps real cumulative traffic until the extension initializes its current-period baseline', async () => {
+    const caller = new FixtureCaller(false, {
+      metadata_billing_mode: 'quota',
+      metadata_traffic_limit: 10,
+      metadata_traffic_period: 'monthly',
+    }, [], {
+      timestamp: Date.now() - 1_000,
+      uptime: 1_000,
+      total_transmitted: 1_200,
+      total_received: 3_400,
+    })
+    const source = new NodeGetSource('Fixture', 'wss://nodeget.example/nodeget/rpc', caller)
+    await source.getClients()
+
+    const statuses = await source.getLatestStatuses([TEST_UUID])
+    expect(statuses[TEST_UUID]!.net_total_up).toBe(1_200)
+    expect(statuses[TEST_UUID]!.net_total_down).toBe(3_400)
+  })
+
   it('keeps standalone traffic metadata in bytes without the extension signature', async () => {
     const caller = new FixtureCaller(false, {
       metadata_traffic_limit: 5_000_000_000,
