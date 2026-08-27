@@ -659,6 +659,7 @@ export class NodeGetSource {
   private trafficPeriodExpiresAt = 0
   private trafficPeriodRefreshPromise: Promise<void> | null = null
   private pingTaskCache: { expiresAt: number, tasks: KomariPingTask[] } | null = null
+  private pingTaskRefreshPromise: Promise<KomariPingTask[]> | null = null
 
   constructor(
     name: string,
@@ -861,6 +862,17 @@ export class NodeGetSource {
   async getPingTasks(): Promise<KomariPingTask[]> {
     if (this.pingTaskCache && this.pingTaskCache.expiresAt > Date.now())
       return this.pingTaskCache.tasks
+    if (!this.pingTaskRefreshPromise) {
+      const refresh = this.loadPingTasks().finally(() => {
+        if (this.pingTaskRefreshPromise === refresh)
+          this.pingTaskRefreshPromise = null
+      })
+      this.pingTaskRefreshPromise = refresh
+    }
+    return this.pingTaskRefreshPromise
+  }
+
+  private async loadPingTasks(): Promise<KomariPingTask[]> {
     const end = Date.now()
     const recentStart = end - PING_TASK_DISCOVERY_WINDOW_MS
     const uuids = Object.keys(this.clientCache).length
@@ -1014,13 +1026,37 @@ export class NodeGetSource {
 
     const pingMetricKeys = metricKeys.filter(key => key.startsWith('ping.'))
     if (pingMetricKeys.length) {
-      await Promise.all(entityIds.map(async (uuid) => {
-        const rows = (await this.queryTaskRows(uuid, start, end))
+      let rowsByEntity: Map<string, TaskRow[]>
+      if (entityIds.length > 1) {
+        try {
+          const requested = new Set(entityIds)
+          const rows = await this.queryTaskRows(undefined, start, end)
+          rowsByEntity = groupBy(
+            rows.filter(row => requested.has(row.uuid)),
+            row => row.uuid,
+          )
+        }
+        catch {
+          rowsByEntity = new Map(await Promise.all(entityIds.map(async uuid => [
+            uuid,
+            await this.queryTaskRows(uuid, start, end),
+          ] as const)))
+        }
+      }
+      else {
+        const uuid = entityIds[0]
+        rowsByEntity = new Map(uuid
+          ? [[uuid, await this.queryTaskRows(uuid, start, end)]]
+          : [])
+      }
+
+      for (const uuid of entityIds) {
+        const rows = (rowsByEntity.get(uuid) ?? [])
           .filter(row => taskMatchesMetricQuery(row, params))
         const byTask = groupBy(rows, row => `${row.taskId}\u0000${row.name}`)
         if (!byTask.size) {
           series.push(...this.emptyMetricResult({ ...params, metric_keys: pingMetricKeys }, [uuid]).series)
-          return
+          continue
         }
         for (const taskRows of byTask.values()) {
           const first = taskRows[0]
@@ -1070,7 +1106,7 @@ export class NodeGetSource {
             })
           }
         }
-      }))
+      }
     }
 
     series.sort((left, right) => `${left.entity_id}:${left.metric_key}:${left.tags.task_id ?? ''}`
