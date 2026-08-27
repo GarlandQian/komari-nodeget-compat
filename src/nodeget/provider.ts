@@ -62,6 +62,32 @@ function fulfilledOrThrow<T>(results: PromiseSettledResult<T>[]): T[] {
   return []
 }
 
+function needsAutomaticHomepagePingBindings(manifest: CompatManifest): boolean {
+  return [manifest.source.short, manifest.source.name]
+    .some(value => value.toLowerCase().replace(/[^a-z0-9]/g, '').includes('luminaplus'))
+}
+
+function automaticHomepagePingBindings(tasks: KomariPingTask[]): Record<string, string[]> {
+  const bindings = Object.create(null) as Record<string, string[]>
+  const assignedClients = new Set<string>()
+  const typePriority = (type: string): number => type === 'ping' ? 0 : type === 'tcp_ping' ? 1 : 2
+  const prioritized = [...tasks].sort((left, right) => (
+    typePriority(left.type) - typePriority(right.type) || left.id - right.id
+  ))
+
+  for (const task of prioritized) {
+    for (const client of task.clients) {
+      if (assignedClients.has(client))
+        continue
+      assignedClients.add(client)
+      const taskId = String(task.id)
+      bindings[taskId] ??= []
+      bindings[taskId]!.push(client)
+    }
+  }
+  return bindings
+}
+
 export class NodeGetMonitorProvider implements MonitorProvider {
   private readonly sources: NodeGetSource[]
   private readonly routes = new Map<string, ClientRoute>()
@@ -96,6 +122,17 @@ export class NodeGetMonitorProvider implements MonitorProvider {
       themeSettings[key] = this.manifest.themeSettingArrayKeys.includes(key)
         ? asStringArray(value)
         : value
+    }
+    if (needsAutomaticHomepagePingBindings(this.manifest)
+      && !Object.hasOwn(preferences, 'homepagePingBindings')) {
+      try {
+        const bindings = automaticHomepagePingBindings(await this.getPingTasks())
+        if (Object.keys(bindings).length)
+          themeSettings.homepagePingBindings = bindings
+      }
+      catch {
+        // Ping permission is optional; public node information must remain available without it.
+      }
     }
 
     return {
