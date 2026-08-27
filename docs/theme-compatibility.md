@@ -28,6 +28,6 @@
 ## 数据限制
 
 - NodeGet 当前摘要协议没有系统温度、GPU 设备详情、GPU 显存和 GPU 温度，相关图表会隐藏或显示不可用。
-- `extension-traffic` 的 GB 配额会转换为字节；已用流量与扩展自身页面保持一致，直接使用 NodeGet 的累计接收量与发送量，不读取重置 Worker 的私有周期基线或 `metadata_traffic_used`。
-- 主题没有有效的 `homepagePingBindings` 分配时，适配层会按统一规则把每个节点自动绑定到一个有真实历史样本的 Ping/TCPing 任务；任务发现兼容全局和按节点授权的只读 Token，已有的非空显式绑定始终优先，不生成模拟延迟。
+- `extension-traffic` 的 GB 配额会转换为字节；启用配额周期后读取扩展维护的周期基线和已用量，未初始化周期基线时回退到 NodeGet 的真实累计流量，不显示错误的 `0B`。
+- 主题没有有效的 `homepagePingBindings` 分配时，适配层会按统一规则把每个节点自动绑定到最近一条真实 Ping/TCPing 任务；发现过程使用 NodeGet 的 `last` 查询，不扫描完整任务历史，已有的非空显式绑定始终优先，不生成模拟延迟。
 - 远程主题的源 JS、CSS、图片和字体依赖 Worker/R2；完全离线使用应选择本地 ZIP 转换。

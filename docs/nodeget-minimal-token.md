@@ -67,3 +67,5 @@ NodeGet 当前版本可使用下面的 `token_limit`。它允许列出节点并�
 ```
 
 多站点时为每个 NodeGet 后端分别创建最小只读 Token，并各自增加一项。真实 Token 不应提交到仓库。保存后刷新主题页面；仍无数据时，先在浏览器开发者工具中检查 WebSocket 是否连接到 `wss://<域名>/nodeget/rpc`，再核对 Token 权限。
+
+公开主题的每个访客都需要连接 NodeGet RPC。适配器会在一批只读查询完成后自动释放空闲连接，但 NodeGet 的 `jsonrpc_max_connections` 仍须覆盖 Agent、管理面板和并发访客的短时连接数。WebSocket 握手返回 `429 Too Many Requests` 或 `Too many connections` 时，应先关闭旧页面或重启 NodeGet 释放连接，再按实际并发量提高该配置。

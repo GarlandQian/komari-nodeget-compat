@@ -14,6 +14,7 @@ interface WebSocketLike {
 type WebSocketFactory = (url: string) => WebSocketLike
 
 const SOCKET_OPEN = 1
+const SOCKET_IDLE_TIMEOUT_MS = 500
 
 interface PendingRequest {
   resolve: (value: unknown) => void
@@ -47,6 +48,7 @@ export interface NodeGetCaller {
 export class NodeGetRpcClient implements NodeGetCaller {
   private socket: WebSocketLike | null = null
   private connecting: Promise<void> | null = null
+  private idleCloseTimer: ReturnType<typeof setTimeout> | null = null
   private nextId = 0
   private readonly pending = new Map<number, PendingRequest>()
   private readonly backendUrl: string
@@ -54,6 +56,7 @@ export class NodeGetRpcClient implements NodeGetCaller {
   constructor(
     private readonly entry: NodeGetSiteToken,
     private readonly createWebSocket: WebSocketFactory = url => new WebSocket(url),
+    private readonly idleTimeoutMs = SOCKET_IDLE_TIMEOUT_MS,
   ) {
     this.backendUrl = normalizeWebSocketUrl(entry.backend_url)
   }
@@ -65,6 +68,7 @@ export class NodeGetRpcClient implements NodeGetCaller {
   ): Promise<T> {
     if (options.signal?.aborted)
       throw options.signal.reason ?? new DOMException('Aborted', 'AbortError')
+    this.cancelIdleClose()
     await this.connect()
     if (!this.socket || this.socket.readyState !== SOCKET_OPEN)
       throw new NodeGetRpcError('NodeGet WebSocket is not connected')
@@ -116,6 +120,7 @@ export class NodeGetRpcClient implements NodeGetCaller {
   }
 
   close(): void {
+    this.cancelIdleClose()
     const socket = this.socket
     this.socket = null
     this.connecting = null
@@ -158,6 +163,7 @@ export class NodeGetRpcClient implements NodeGetCaller {
           return
         settled = true
         clearTimeout(timeout)
+        this.cancelIdleClose()
         if (this.socket === socket)
           this.socket = null
         socket.close(4001, 'Connection failed')
@@ -171,6 +177,7 @@ export class NodeGetRpcClient implements NodeGetCaller {
       socket.onclose = () => {
         clearTimeout(timeout)
         if (this.socket === socket) {
+          this.cancelIdleClose()
           this.socket = null
           this.rejectAll(new NodeGetRpcError('NodeGet WebSocket disconnected'))
         }
@@ -225,6 +232,28 @@ export class NodeGetRpcClient implements NodeGetCaller {
     clearTimeout(pending.timeout)
     pending.removeAbortListener?.()
     this.pending.delete(id)
+    if (this.pending.size === 0)
+      this.scheduleIdleClose()
+  }
+
+  private scheduleIdleClose(): void {
+    this.cancelIdleClose()
+    const socket = this.socket
+    if (!socket || socket.readyState !== SOCKET_OPEN || this.pending.size > 0)
+      return
+    this.idleCloseTimer = setTimeout(() => {
+      this.idleCloseTimer = null
+      if (this.socket !== socket || socket.readyState !== SOCKET_OPEN || this.pending.size > 0)
+        return
+      this.socket = null
+      socket.close(1000, 'Idle connection released')
+    }, Math.max(0, this.idleTimeoutMs))
+  }
+
+  private cancelIdleClose(): void {
+    if (this.idleCloseTimer)
+      clearTimeout(this.idleCloseTimer)
+    this.idleCloseTimer = null
   }
 
   private rejectAll(error: Error): void {
