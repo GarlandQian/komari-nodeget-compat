@@ -51,6 +51,8 @@ Worker 调用 GitHub `releases/latest` 获取最新正式 Release。公共 GitHu
 
 R2 桶名固定为 `komari-nodeget-theme-cache`，由 GitHub Actions 自动创建并通过 `THEME_CACHE` 绑定。桶不需要也不应开启 `r2.dev` 公共访问。
 
+R2 内容是可重建缓存。即使手动清空后 Worker 内存中仍残留旧索引，下一次访问 `latest` 文件也会检测数据包缺失，并从对应 GitHub Release 自动重建一次；不需要上传备份文件。清空过程中已经发出的请求仍可能失败，重试远程导入即可。
+
 每次生产部署完成后，workflow 会遍历白名单并请求清单、预览、入口、运行时、配置和一个 `v2` 固定资源。该步骤既会触发首次转换写入 R2，也会在任何主题转换失败、资源缺失或 ACG 配置未注入时让部署任务失败。手动只执行 `wrangler deploy` 不会预热，R2 会在第一次主题请求时懒加载。
 
 ## 配置白名单

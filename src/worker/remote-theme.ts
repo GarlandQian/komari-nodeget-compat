@@ -779,6 +779,7 @@ async function buildBundle(
   fetcher: typeof fetch,
   now: number,
   requestOrigin: string,
+  forceRebuild = false,
 ): Promise<BundleAlias> {
   const bucket = env.THEME_CACHE
   if (!bucket)
@@ -799,10 +800,12 @@ async function buildBundle(
     bundle,
   }
 
-  const existing = await readBundleIndex(bucket, bundle.indexKey)
-  if (existing) {
-    await writeAlias(bucket, key, alias)
-    return alias
+  if (!forceRebuild) {
+    const existing = await readBundleIndex(bucket, bundle.indexKey)
+    if (existing) {
+      await writeAlias(bucket, key, alias)
+      return alias
+    }
   }
 
   const [source, runtimeResponse] = await Promise.all([
@@ -852,6 +855,58 @@ async function buildBundle(
   return alias
 }
 
+async function runBundleBuild(
+  route: RemoteThemeRoute,
+  env: RemoteThemeEnvironment,
+  release: GitHubRelease,
+  asset: GitHubAsset,
+  dependencies: Required<RemoteThemeDependencies>,
+  now: number,
+  requestOrigin: string,
+  forceRebuild = false,
+): Promise<BundleAlias> {
+  const buildKey = `${REMOTE_CONVERSION_VERSION}:${route.repository.toLowerCase()}:${asset.id}`
+  const active = activeBuilds.get(buildKey)
+  if (active) {
+    if (!forceRebuild)
+      return active
+    try {
+      return await active
+    }
+    catch {
+      // A forced repair gets its own attempt after an earlier build fails.
+    }
+  }
+
+  if (forceRebuild)
+    indexMemory.delete(bundleKeys(route, asset.id).indexKey)
+
+  const build = buildBundle(
+    route,
+    env,
+    release,
+    asset,
+    dependencies.fetcher,
+    now,
+    requestOrigin,
+    forceRebuild,
+  ).finally(() => {
+    if (activeBuilds.get(buildKey) === build)
+      activeBuilds.delete(buildKey)
+  })
+  activeBuilds.set(buildKey, build)
+  return build
+}
+
+function releaseFromAlias(alias: BundleAlias): GitHubRelease {
+  return {
+    id: alias.release.id,
+    tag_name: alias.release.tag,
+    published_at: alias.release.publishedAt,
+    assets: [alias.asset],
+  }
+}
+
 async function resolveBundle(
   route: RemoteThemeRoute,
   env: RemoteThemeEnvironment,
@@ -893,25 +948,15 @@ async function resolveBundle(
     return refreshed
   }
 
-  const buildKey = `${REMOTE_CONVERSION_VERSION}:${route.repository.toLowerCase()}:${latest.asset.id}`
-  const active = activeBuilds.get(buildKey)
-  if (active)
-    return active
-
-  const build = buildBundle(
+  return runBundleBuild(
     route,
     env,
     latest.release,
     latest.asset,
-    dependencies.fetcher,
+    dependencies,
     now,
     requestOrigin,
-  ).finally(() => {
-    if (activeBuilds.get(buildKey) === build)
-      activeBuilds.delete(buildKey)
-  })
-  activeBuilds.set(buildKey, build)
-  return build
+  )
 }
 
 async function resolvePinnedBundle(
@@ -1178,9 +1223,30 @@ export async function handleRemoteTheme(
     let index: BundleIndex | null
     if (route.channel === 'latest') {
       alias = await resolveBundle(route, env, resolvedDependencies, url.origin)
-      index = await readBundleIndex(env.THEME_CACHE!, alias.bundle.indexKey)
-      if (!index)
-        throw new RemoteThemeError(503, 'theme_cache_incomplete', 'Cached theme index is missing')
+      try {
+        index = await readBundleIndex(env.THEME_CACHE!, alias.bundle.indexKey)
+        if (!index)
+          throw new RemoteThemeError(503, 'theme_cache_incomplete', 'Cached theme index is missing')
+        return await servePackedFile(request, route, env, alias, index)
+      }
+      catch (error) {
+        if (!(error instanceof RemoteThemeError) || error.code !== 'theme_cache_incomplete')
+          throw error
+        alias = await runBundleBuild(
+          route,
+          env,
+          releaseFromAlias(alias),
+          alias.asset,
+          resolvedDependencies,
+          resolvedDependencies.now(),
+          url.origin,
+          true,
+        )
+        index = await readBundleIndex(env.THEME_CACHE!, alias.bundle.indexKey)
+        if (!index)
+          throw new RemoteThemeError(503, 'theme_cache_incomplete', 'Rebuilt theme index is missing')
+        return await servePackedFile(request, route, env, alias, index)
+      }
     }
     else {
       const pinned = await resolvePinnedBundle(route, env, resolvedDependencies.now())
