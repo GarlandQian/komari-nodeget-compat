@@ -297,6 +297,35 @@ describe('remote NodeGet theme distribution', () => {
     expect([...bucket.objects.keys()].some(key => key.includes('/compat-v4/theme.pack'))).toBe(true)
   })
 
+  it('repairs a deleted R2 bundle while the Worker still has warm memory caches', async () => {
+    const bucket = new MemoryBucket()
+    const { fetcher, calls } = fixtureFetch(sourceTheme())
+    const env = environment(bucket)
+    const url = 'https://adapter.example/themes/github/test-owner/test-theme/latest/nodeget-theme.json'
+
+    const initial = await handleRemoteTheme(
+      new Request(url),
+      env,
+      { fetcher, now: () => 1_000_000 },
+    )
+    expect(initial?.status).toBe(200)
+    expect(calls).toEqual({ api: 1, asset: 1 })
+
+    bucket.objects.clear()
+    const repaired = await handleRemoteTheme(
+      new Request(url),
+      env,
+      { fetcher, now: () => 1_000_100 },
+    )
+
+    expect(repaired?.status).toBe(200)
+    expect((await repaired!.json() as Record<string, unknown>).version).toBe('2.0.0')
+    expect(calls).toEqual({ api: 1, asset: 2 })
+    expect([...bucket.objects.keys()].some(key => key.endsWith('/theme.pack'))).toBe(true)
+    expect([...bucket.objects.keys()].some(key => key.endsWith('/index.json'))).toBe(true)
+    expect([...bucket.objects.keys()].some(key => key.startsWith('aliases/'))).toBe(true)
+  })
+
   it('returns a stable NodeGet import address without starting a conversion', async () => {
     const bucket = new MemoryBucket()
     const { fetcher, calls } = fixtureFetch(sourceTheme())
