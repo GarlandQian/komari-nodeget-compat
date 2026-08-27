@@ -45,6 +45,14 @@ function hasAttribute(element: Element, name: string, value?: string): boolean {
   return element.attrs.some(attribute => attribute.name === name && (value === undefined || attribute.value === value))
 }
 
+function setAttribute(element: Element, name: string, value: string): void {
+  const current = element.attrs.find(attribute => attribute.name === name)
+  if (current)
+    current.value = value
+  else
+    element.attrs.push({ name, value })
+}
+
 function walkElements(node: Node, visitor: (element: Element) => void): void {
   if (isElement(node))
     visitor(node)
@@ -165,13 +173,24 @@ export function rewriteRemoteThemeAssets(
   html: string,
   remoteBase: string,
   themeShort?: string,
+  compatibilityRuntimeBase?: string,
 ): string {
   const remoteBaseUrl = normalizedRemoteBaseUrl(remoteBase)
+  const compatibilityRuntimeBaseUrl = compatibilityRuntimeBase
+    ? normalizedRemoteBaseUrl(compatibilityRuntimeBase)
+    : null
   const document = parse(html)
 
   walkElements(document, (element) => {
-    if (!ASSET_ELEMENTS.has(element.tagName) || hasAttribute(element, 'data-komari-nodeget-compat'))
+    if (!ASSET_ELEMENTS.has(element.tagName))
       return
+    if (hasAttribute(element, 'data-komari-nodeget-compat')) {
+      if (element.tagName === 'script' && compatibilityRuntimeBaseUrl) {
+        setAttribute(element, 'src', `${compatibilityRuntimeBaseUrl}/komari-nodeget-runtime.js`)
+        setAttribute(element, 'data-komari-nodeget-config-base', './')
+      }
+      return
+    }
     for (const attribute of element.attrs) {
       if (attribute.name === 'src' || attribute.name === 'href' || attribute.name === 'poster')
         attribute.value = remoteAssetUrl(attribute.value, remoteBaseUrl)
@@ -203,7 +222,7 @@ export function injectCompatibilityRuntime(html: string, themeShort: string): st
     && node.tagName === 'script'
     && hasAttribute(node, 'data-komari-nodeget-compat'))
   if (!alreadyInjected) {
-    const runtimeScript = fragmentElement('<script src="./komari-nodeget-runtime.js" data-komari-nodeget-compat></script>')
+    const runtimeScript = fragmentElement('<script src="./komari-nodeget-runtime.js" data-komari-nodeget-compat data-komari-nodeget-config-base="./"></script>')
     const firstChild = head.childNodes[0]
     if (firstChild)
       defaultTreeAdapter.insertBefore(head, runtimeScript, firstChild)
