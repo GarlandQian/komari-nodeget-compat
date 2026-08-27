@@ -1138,9 +1138,12 @@ async function servePackedFile(
       return notModifiedResponse(headers)
     const source = new TextDecoder().decode(await readPackedFileBytes(bucket, alias, file))
     const remoteBase = `${new URL(request.url).origin}${releaseBasePath(route, alias.asset.id)}`
+    const compatibilityRuntimeBase = route.channel === 'latest'
+      ? `${new URL(request.url).origin}${route.basePath}`
+      : undefined
     const branded = rewriteThemeAppearanceText(source, themeAppearance(request, env))
     const body = route.filePath === 'index.html'
-      ? rewriteRemoteThemeAssets(branded, remoteBase, index.metadata.sourceShort)
+      ? rewriteRemoteThemeAssets(branded, remoteBase, index.metadata.sourceShort, compatibilityRuntimeBase)
       : rewriteRemoteTextAssetReferences(branded, remoteBase, index.metadata.sourceShort)
     return textResponse(request, headers, body, route.channel)
   }

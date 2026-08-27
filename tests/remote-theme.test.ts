@@ -214,7 +214,8 @@ describe('remote NodeGet theme distribution', () => {
     expect(html).toContain(`${pinnedBase}/images/logo.png`)
     expect(html).toContain('https://adapter.example/nodeget-logo.png')
     expect(html).toContain('<title>NodeGet Monitor</title>')
-    expect(html).toContain('./komari-nodeget-runtime.js')
+    expect(html).toContain(`${base}/komari-nodeget-runtime.js`)
+    expect(html).toContain('data-komari-nodeget-config-base="./"')
     expect(html).toContain('./custom.css')
     expect(html).toContain('./custom.js')
 

@@ -35,6 +35,18 @@ describe('remote theme asset rewriting', () => {
     expect(html).toContain('src="data:image/png;base64,AAAA"')
   })
 
+  it('uses the latest remote runtime while keeping runtime config relative to NodeGet', () => {
+    const latestBase = 'https://adapter.example/themes/github/owner/theme/latest'
+    const html = rewriteRemoteThemeAssets(`<!doctype html><html><head>
+      <script src="./komari-nodeget-runtime.js" data-komari-nodeget-compat></script>
+      <script type="module" src="./assets/app.js"></script>
+    </head><body></body></html>`, remoteBase, 'Fixture', latestBase)
+
+    expect(html).toContain(`src="${latestBase}/komari-nodeget-runtime.js"`)
+    expect(html).toContain('data-komari-nodeget-config-base="./"')
+    expect(html).toContain(`src="${remoteBase}/assets/app.js"`)
+  })
+
   it('rewrites root and Komari theme paths in JS and CSS without touching APIs or external URLs', () => {
     const source = `const image="/images/flag.svg";const preload="assets/chunk.css";const relative='./fonts/font.woff2';const api='/api/public';const external="https://cdn.example/images/x.png";const legacy='/themes/Fixture/dist/assets/app.js';const pattern=(/images/);const rel="modulepreload",assetUrl=function(e){return"/"+e};.hero{background:url(/fonts/font.woff2)}`
     const rewritten = rewriteRemoteTextAssetReferences(source, remoteBase, 'Fixture')
@@ -64,5 +76,6 @@ describe('remote theme asset rewriting', () => {
       'LuminaPlus',
     )
     expect(output).toContain('href="./manifest.json"')
+    expect(output).toContain('data-komari-nodeget-config-base="./"')
   })
 })

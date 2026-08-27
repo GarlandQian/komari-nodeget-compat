@@ -37,8 +37,13 @@ function unavailableResponse(error: unknown): Response {
 
 function runtimeBaseUrl(): URL {
   const currentScript = document.currentScript
-  if (currentScript instanceof HTMLScriptElement && currentScript.src)
-    return new URL('.', currentScript.src)
+  if (currentScript instanceof HTMLScriptElement) {
+    const configuredBase = currentScript.getAttribute('data-komari-nodeget-config-base')
+    if (configuredBase)
+      return new URL(configuredBase, window.location.href)
+    if (currentScript.src)
+      return new URL('.', currentScript.src)
+  }
   return new URL('.', document.baseURI)
 }
 
