@@ -62,11 +62,6 @@ function fulfilledOrThrow<T>(results: PromiseSettledResult<T>[]): T[] {
   return []
 }
 
-function needsAutomaticHomepagePingBindings(manifest: CompatManifest): boolean {
-  return [manifest.source.short, manifest.source.name]
-    .some(value => value.toLowerCase().replace(/[^a-z0-9]/g, '').includes('luminaplus'))
-}
-
 function automaticHomepagePingBindings(tasks: KomariPingTask[]): Record<string, string[]> {
   const bindings = Object.create(null) as Record<string, string[]>
   const assignedClients = new Set<string>()
@@ -123,8 +118,7 @@ export class NodeGetMonitorProvider implements MonitorProvider {
         ? asStringArray(value)
         : value
     }
-    if (needsAutomaticHomepagePingBindings(this.manifest)
-      && !Object.hasOwn(preferences, 'homepagePingBindings')) {
+    if (!Object.hasOwn(preferences, 'homepagePingBindings')) {
       try {
         const bindings = automaticHomepagePingBindings(await this.getPingTasks())
         if (Object.keys(bindings).length)
