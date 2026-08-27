@@ -83,6 +83,12 @@ function automaticHomepagePingBindings(tasks: KomariPingTask[]): Record<string, 
   return bindings
 }
 
+function hasHomepagePingAssignments(value: unknown): boolean {
+  return isRecord(value) && Object.values(value).some(clients => (
+    Array.isArray(clients) && clients.some(client => typeof client === 'string' && client.trim())
+  ))
+}
+
 export class NodeGetMonitorProvider implements MonitorProvider {
   private readonly sources: NodeGetSource[]
   private readonly routes = new Map<string, ClientRoute>()
@@ -118,7 +124,7 @@ export class NodeGetMonitorProvider implements MonitorProvider {
         ? asStringArray(value)
         : value
     }
-    if (!Object.hasOwn(preferences, 'homepagePingBindings')) {
+    if (!hasHomepagePingAssignments(preferences.homepagePingBindings)) {
       try {
         const bindings = automaticHomepagePingBindings(await this.getPingTasks())
         if (Object.keys(bindings).length)

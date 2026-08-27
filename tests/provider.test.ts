@@ -63,7 +63,7 @@ describe('NodeGetMonitorProvider', () => {
     expect(info.theme_settings).not.toHaveProperty('metric_retention_days')
   })
 
-  it('automatically exposes real homepage Ping bindings for themes without explicit bindings', async () => {
+  it('automatically exposes real homepage Ping bindings from scoped task queries when bindings are empty', async () => {
     const uuid = '77777777-7777-4777-8777-777777777777'
     const caller: NodeGetCaller = {
       async call<T>(method: string, params?: Record<string, unknown>): Promise<T> {
@@ -77,6 +77,8 @@ describe('NodeGetMonitorProvider', () => {
           return [{ uuid, timestamp: Date.now(), total_memory: 1_000, total_space: 2_000 }] as T
         if (method === 'task_query') {
           const condition = (params?.task_data_query as { condition: Array<Record<string, unknown>> }).condition
+          if (!condition.some(item => item.uuid === uuid))
+            throw new Error('global task query denied')
           const type = condition.find(item => item.type)?.type
           return (type === 'ping'
             ? [{
@@ -93,6 +95,7 @@ describe('NodeGetMonitorProvider', () => {
       close() {},
     }
     const provider = new NodeGetMonitorProvider({
+      user_preferences: { homepagePingBindings: {} },
       site_tokens: [{ name: 'Only', backend_url: 'https://only.example', token: 'token' }],
     }, manifest, () => caller)
 
