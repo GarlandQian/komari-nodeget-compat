@@ -15,6 +15,7 @@ type WebSocketFactory = (url: string) => WebSocketLike
 
 const SOCKET_OPEN = 1
 const SOCKET_IDLE_TIMEOUT_MS = 500
+const SOCKET_CONNECT_RETRY_DELAY_MS = 150
 
 interface PendingRequest {
   resolve: (value: unknown) => void
@@ -69,7 +70,17 @@ export class NodeGetRpcClient implements NodeGetCaller {
     if (options.signal?.aborted)
       throw options.signal.reason ?? new DOMException('Aborted', 'AbortError')
     this.cancelIdleClose()
-    await this.connect()
+    try {
+      await this.connect()
+    }
+    catch {
+      if (options.signal?.aborted)
+        throw options.signal.reason ?? new DOMException('Aborted', 'AbortError')
+      await new Promise(resolve => setTimeout(resolve, SOCKET_CONNECT_RETRY_DELAY_MS))
+      if (options.signal?.aborted)
+        throw options.signal.reason ?? new DOMException('Aborted', 'AbortError')
+      await this.connect()
+    }
     if (!this.socket || this.socket.readyState !== SOCKET_OPEN)
       throw new NodeGetRpcError('NodeGet WebSocket is not connected')
 

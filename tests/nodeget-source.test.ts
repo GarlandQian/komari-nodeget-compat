@@ -436,6 +436,59 @@ describe('NodeGetSource', () => {
     expect(result.tasks[0]?.type).toBe('ping')
   })
 
+  it('shares one global Ping query across multiple metric entities', async () => {
+    const uuids = [
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222',
+    ]
+    const taskConditions: Array<Array<Record<string, unknown>>> = []
+    const now = Date.now()
+    const caller: NodeGetCaller = {
+      async call<T>(method: string, params: Record<string, unknown>): Promise<T> {
+        if (method !== 'task_query')
+          throw new Error(`Unexpected method: ${method}`)
+        const condition = (params.task_data_query as { condition: Array<Record<string, unknown>> }).condition
+        taskConditions.push(condition)
+        const type = condition.find(item => item.type)?.type
+        return (type === 'ping'
+          ? uuids.map((uuid, index) => ({
+              uuid,
+              timestamp: now - 1_000,
+              success: true,
+              cron_source: 'Shared Ping',
+              task_event_result: { ping: 20 + index },
+            }))
+          : []) as T
+      },
+      close() {},
+    }
+    const source = new NodeGetSource('Fixture', 'wss://nodeget.example/nodeget/rpc', caller)
+
+    const result = await source.queryMetrics({
+      entity_ids: uuids,
+      metric_keys: ['ping.latency_ms', 'ping.loss'],
+      start: new Date(now - 60_000).toISOString(),
+      end: new Date(now).toISOString(),
+      max_points: 24,
+    })
+
+    expect(taskConditions).toHaveLength(2)
+    expect(taskConditions.every(condition => condition.every(item => !Object.hasOwn(item, 'uuid')))).toBe(true)
+    expect(new Set(result.series.map(series => series.entity_id))).toEqual(new Set(uuids))
+    expect(result.series.filter(series => series.metric_key === 'ping.latency_ms')).toHaveLength(2)
+  })
+
+  it('deduplicates concurrent Ping task discovery scans', async () => {
+    const caller = new FixtureCaller()
+    const source = new NodeGetSource('Fixture', 'wss://nodeget.example/nodeget/rpc', caller)
+
+    const [first, second] = await Promise.all([source.getPingTasks(), source.getPingTasks()])
+
+    expect(first).toEqual(second)
+    expect(caller.calls.filter(call => call.method === 'agent-uuid_list_all')).toHaveLength(1)
+    expect(caller.calls.filter(call => call.method === 'task_query')).toHaveLength(2)
+  })
+
   it('rejects empty and unknown metric requests instead of reporting false support', async () => {
     const source = new NodeGetSource('Fixture', 'wss://nodeget.example/nodeget/rpc', new FixtureCaller())
     await expect(source.queryMetrics({})).rejects.toThrow('metric_keys is required')

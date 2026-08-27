@@ -60,6 +60,13 @@ class ManualSocket extends FakeSocket {
   }
 }
 
+class FailedSocket extends FakeSocket {
+  constructor() {
+    super(false)
+    queueMicrotask(() => this.onerror?.(new Event('error')))
+  }
+}
+
 describe('NodeGetRpcClient', () => {
   it('never allows call params to replace the configured token', async () => {
     const socket = new FakeSocket()
@@ -99,6 +106,24 @@ describe('NodeGetRpcClient', () => {
     )
     expect(await client.call<string>('test_method')).toBe('ok')
     expect(connectedUrl).toBe('wss://nodeget.example/nodeget/rpc')
+    client.close()
+  })
+
+  it('retries a WebSocket connection that fails before sending the request', async () => {
+    const sockets: FakeSocket[] = []
+    const client = new NodeGetRpcClient(
+      { backend_url: 'wss://nodeget.example', token: 'read-only-token' },
+      () => {
+        const socket = sockets.length === 0 ? new FailedSocket() : new FakeSocket()
+        sockets.push(socket)
+        return socket
+      },
+    )
+
+    expect(await client.call<string>('test_method')).toBe('ok')
+    expect(sockets).toHaveLength(2)
+    expect(sockets[0]?.sent).toHaveLength(0)
+    expect(sockets[1]?.sent).toHaveLength(1)
     client.close()
   })
 

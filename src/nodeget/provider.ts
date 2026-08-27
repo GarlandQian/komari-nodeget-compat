@@ -20,7 +20,7 @@ import type {
 } from '../types'
 import type { NodeGetCaller } from './rpc-client'
 import { asStringArray, downsampleGroupsProportionally, finiteNumber, isRecord } from '../shared/utils'
-import { NodeGetRpcClient } from './rpc-client'
+import { NodeGetRpcClient, NodeGetRpcError } from './rpc-client'
 import { NodeGetSource } from './source'
 
 interface ClientRoute {
@@ -31,6 +31,8 @@ interface ClientRoute {
 type CallerFactory = (entry: NodeGetSiteToken) => NodeGetCaller
 
 const CLIENT_CACHE_TTL_MS = 30_000
+const HOMEPAGE_PING_DISCOVERY_ATTEMPTS = 2
+const HOMEPAGE_PING_DISCOVERY_RETRY_MS = 150
 const RESERVED_PREFERENCES = new Set([
   'site_name',
   'site_title',
@@ -89,6 +91,11 @@ function hasHomepagePingAssignments(value: unknown): boolean {
   ))
 }
 
+function isPermissionDenied(error: unknown): boolean {
+  return (error instanceof NodeGetRpcError && error.code === 102)
+    || (error instanceof Error && /permission denied/i.test(error.message))
+}
+
 export class NodeGetMonitorProvider implements MonitorProvider {
   private readonly sources: NodeGetSource[]
   private readonly routes = new Map<string, ClientRoute>()
@@ -124,14 +131,16 @@ export class NodeGetMonitorProvider implements MonitorProvider {
         ? asStringArray(value)
         : value
     }
-    if (!hasHomepagePingAssignments(preferences.homepagePingBindings)) {
+    if (this.sources.length && !hasHomepagePingAssignments(preferences.homepagePingBindings)) {
       try {
-        const bindings = automaticHomepagePingBindings(await this.getPingTasks())
+        const bindings = await this.discoverHomepagePingBindings()
         if (Object.keys(bindings).length)
           themeSettings.homepagePingBindings = bindings
       }
-      catch {
-        // Ping permission is optional; public node information must remain available without it.
+      catch (error) {
+        if (!isPermissionDenied(error))
+          throw error
+        // Ping permission is optional; public node information remains available without it.
       }
     }
 
@@ -156,6 +165,23 @@ export class NodeGetMonitorProvider implements MonitorProvider {
 
   async getVersion(): Promise<KomariVersionInfo> {
     return { version: '1.3.0-nodeget', hash: 'komari-nodeget-compat' }
+  }
+
+  private async discoverHomepagePingBindings(): Promise<Record<string, string[]>> {
+    let failure: unknown
+    for (let attempt = 0; attempt < HOMEPAGE_PING_DISCOVERY_ATTEMPTS; attempt += 1) {
+      try {
+        return automaticHomepagePingBindings(await this.getPingTasks())
+      }
+      catch (error) {
+        if (isPermissionDenied(error))
+          throw error
+        failure = error
+        if (attempt + 1 < HOMEPAGE_PING_DISCOVERY_ATTEMPTS)
+          await new Promise(resolve => setTimeout(resolve, HOMEPAGE_PING_DISCOVERY_RETRY_MS))
+      }
+    }
+    throw failure ?? new Error('NodeGet homepage Ping discovery failed')
   }
 
   async getClients(): Promise<Record<string, KomariClient>> {

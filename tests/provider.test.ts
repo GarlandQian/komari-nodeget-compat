@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import type { NodeGetCaller } from '../src/nodeget/rpc-client'
+import { NodeGetRpcError } from '../src/nodeget/rpc-client'
 import { NodeGetMonitorProvider } from '../src/nodeget/provider'
 
 const manifest = {
@@ -107,6 +108,76 @@ describe('NodeGetMonitorProvider', () => {
     expect(taskConditions.length).toBeGreaterThan(0)
     expect(taskConditions.every(condition => condition.every(item => !Object.hasOwn(item, 'last')))).toBe(true)
     expect(taskConditions.every(condition => condition.some(item => Object.hasOwn(item, 'timestamp_from_to')))).toBe(true)
+  })
+
+  it('retries temporary homepage Ping discovery failures before returning public settings', async () => {
+    const uuid = '88888888-8888-4888-8888-888888888888'
+    let uuidListAttempts = 0
+    const caller: NodeGetCaller = {
+      async call<T>(method: string, params?: Record<string, unknown>): Promise<T> {
+        if (method === 'agent-uuid_list_all') {
+          uuidListAttempts += 1
+          if (uuidListAttempts === 1)
+            throw new Error('temporary connection failure')
+          return [uuid] as T
+        }
+        if (method === 'nodeget-server_list_all_agent_uuid' && uuidListAttempts === 1)
+          throw new Error('temporary connection failure')
+        if (method === 'agent_static_data_multi_last_query')
+          return [] as T
+        if (method === 'kv_get_multi_value')
+          return [{ namespace: uuid, key: 'metadata_name', value: 'Retry node' }] as T
+        if (method === 'agent_dynamic_summary_multi_last_query')
+          return [{ uuid, timestamp: Date.now(), total_memory: 1_000, total_space: 2_000 }] as T
+        if (method === 'task_query') {
+          const condition = (params?.task_data_query as { condition: Array<Record<string, unknown>> }).condition
+          const type = condition.find(item => item.type)?.type
+          return (type === 'ping'
+            ? [{
+                uuid,
+                timestamp: Date.now() - 1_000,
+                success: true,
+                cron_source: 'Homepage Ping',
+                task_event_result: { ping: 16 },
+              }]
+            : []) as T
+        }
+        throw new Error(`Unexpected method: ${method}`)
+      },
+      close() {},
+    }
+    const provider = new NodeGetMonitorProvider({
+      site_tokens: [{ name: 'Only', backend_url: 'https://only.example', token: 'token' }],
+    }, manifest, () => caller)
+
+    const info = await provider.getPublicInfo()
+    const bindings = info.theme_settings.homepagePingBindings as Record<string, string[]>
+
+    expect(uuidListAttempts).toBe(2)
+    expect(Object.values(bindings)).toEqual([[uuid]])
+  })
+
+  it('only suppresses homepage Ping discovery errors caused by missing permissions', async () => {
+    const permissionDenied: NodeGetCaller = {
+      async call(): Promise<never> {
+        throw new NodeGetRpcError('Permission denied: missing Task::Query permission', 102)
+      },
+      close() {},
+    }
+    const unavailable: NodeGetCaller = {
+      async call(): Promise<never> {
+        throw new Error('backend temporarily unavailable')
+      },
+      close() {},
+    }
+    const config = {
+      site_tokens: [{ name: 'Only', backend_url: 'https://only.example', token: 'token' }],
+    }
+
+    const publicInfo = await new NodeGetMonitorProvider(config, manifest, () => permissionDenied).getPublicInfo()
+    expect(publicInfo.theme_settings).not.toHaveProperty('homepagePingBindings')
+    await expect(new NodeGetMonitorProvider(config, manifest, () => unavailable).getPublicInfo())
+      .rejects.toThrow('backend temporarily unavailable')
   })
 
   it('preserves explicit homepage Ping bindings without requiring Ping permission', async () => {
