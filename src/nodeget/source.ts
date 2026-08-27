@@ -58,6 +58,8 @@ const TRAFFIC_EXTENSION_BILLING_MODES = new Set(['quota', 'payg'])
 const TRAFFIC_EXTENSION_PERIODS = new Set(['hourly', 'daily', 'weekly', 'monthly', 'never'])
 const TRAFFIC_PERIOD_CACHE_TTL_MS = 60_000
 const TRAFFIC_PERIOD_RETRY_MS = 15_000
+const PING_TASK_DISCOVERY_WINDOW_MS = 3_600_000
+const PING_TASK_FALLBACK_WINDOW_MS = 24 * 3_600_000
 const TRAFFIC_LIMIT_TYPES = new Set(['sum', 'max', 'min', 'up', 'down'])
 const METRIC_AGGREGATIONS = new Set([
   'avg',
@@ -859,26 +861,40 @@ export class NodeGetSource {
   async getPingTasks(): Promise<KomariPingTask[]> {
     if (this.pingTaskCache && this.pingTaskCache.expiresAt > Date.now())
       return this.pingTaskCache.tasks
+    const end = Date.now()
+    const recentStart = end - PING_TASK_DISCOVERY_WINDOW_MS
     const uuids = Object.keys(this.clientCache).length
       ? Object.keys(this.clientCache)
       : await this.listAgentUuids()
-    const rows: TaskRow[] = []
-    let successfulQueries = 0
+    let rows: TaskRow[] = []
+    let globalQuerySucceeded = false
     let firstFailure: unknown
-    for (let index = 0; index < uuids.length; index += 4) {
-      const results = await Promise.allSettled(uuids.slice(index, index + 4).map(uuid => (
-        this.queryTaskRows(uuid, 0, Date.now(), Number.MAX_SAFE_INTEGER, true)
+    try {
+      rows = await this.queryTaskRows(undefined, recentStart, end, PING_TASK_DISCOVERY_WINDOW_MS)
+      globalQuerySucceeded = true
+    }
+    catch (error) {
+      firstFailure = error
+    }
+
+    const coveredUuids = new Set(rows.map(row => row.uuid))
+    const missingUuids = uuids.filter(uuid => !coveredUuids.has(uuid))
+    let scopedQuerySucceeded = false
+    const fallbackStart = end - PING_TASK_FALLBACK_WINDOW_MS
+    for (let index = 0; index < missingUuids.length; index += 4) {
+      const results = await Promise.allSettled(missingUuids.slice(index, index + 4).map(uuid => (
+        this.queryTaskRows(uuid, fallbackStart, end, PING_TASK_FALLBACK_WINDOW_MS)
       )))
       for (const result of results) {
         if (result.status === 'rejected') {
           firstFailure ??= result.reason
           continue
         }
-        successfulQueries += 1
+        scopedQuerySucceeded = true
         rows.push(...result.value)
       }
     }
-    if (uuids.length && successfulQueries === 0)
+    if (uuids.length && !globalQuerySucceeded && !scopedQuerySucceeded)
       throw firstFailure ?? new Error('NodeGet task query failed')
 
     const tasks = this.tasksFromRows(rows)
@@ -1243,16 +1259,10 @@ export class NodeGetSource {
     start: number,
     end: number,
     windowMs = 3_600_000,
-    latestRecordOnly = false,
   ): Promise<TaskRow[]> {
     const windows: Array<{ from: number, to: number }> = []
-    if (latestRecordOnly) {
-      windows.push({ from: start, to: end })
-    }
-    else {
-      for (let from = start; from < end; from += windowMs)
-        windows.push({ from, to: Math.min(end, from + windowMs) })
-    }
+    for (let from = start; from < end; from += windowMs)
+      windows.push({ from, to: Math.min(end, from + windowMs) })
 
     const rawRows: RawTaskRow[] = []
     let successfulQueries = 0
@@ -1264,7 +1274,8 @@ export class NodeGetSource {
           condition.push({ uuid })
         condition.push(
           { type },
-          ...(latestRecordOnly ? [{ last: null }] : [{ timestamp_from_to: [from, to] }, { limit: 10_000 }]),
+          { timestamp_from_to: [from, to] },
+          { limit: 10_000 },
         )
         return this.rpc.call<unknown>('task_query', { task_data_query: { condition } })
           .then(response => ({ requestedType: type, response }))
@@ -1297,7 +1308,7 @@ export class NodeGetSource {
       if (!rowUuid)
         continue
       const timestamp = timestampMs(row.timestamp ?? row.storage_time)
-      if (!timestamp || (!latestRecordOnly && (timestamp < start || timestamp > end)))
+      if (!timestamp || timestamp < start || timestamp > end)
         continue
       const type = typeof result.tcp_ping === 'number'
         ? 'tcp_ping'
