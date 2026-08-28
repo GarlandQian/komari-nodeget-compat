@@ -15,6 +15,7 @@ import type {
   PingRecordsResult,
 } from '../types'
 import type { NodeGetCaller } from './rpc-client'
+import { rankPingTasks } from './ping-task-order'
 import {
   downsampleEvenly,
   downsampleGroupsProportionally,
@@ -1394,24 +1395,7 @@ export class NodeGetSource {
       }
     })
 
-    // Keep automatic defaults within one probe family without favoring a specific protocol.
-    const rankedTypes = [...groupBy(tasks, task => task.type).entries()]
-      .map(([type, typeTasks]) => ({
-        type,
-        taskCount: typeTasks.length,
-        clientCount: new Set(typeTasks.flatMap(task => task.clients)).size,
-        firstTaskId: Math.min(...typeTasks.map(task => task.id)),
-      }))
-      .sort((left, right) => (
-        right.taskCount - left.taskCount
-        || right.clientCount - left.clientCount
-        || left.firstTaskId - right.firstTaskId
-      ))
-    const weightByType = new Map(rankedTypes.map((entry, index) => [entry.type, index]))
-
-    return tasks
-      .map(task => ({ ...task, weight: weightByType.get(task.type) ?? rankedTypes.length }))
-      .sort((left, right) => left.id - right.id)
+    return rankPingTasks(tasks).sort((left, right) => left.id - right.id)
   }
 
   private pingBasicInfo(records: KomariPingRecord[]): KomariPingBasicInfo[] {
