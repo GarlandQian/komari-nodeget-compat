@@ -527,7 +527,36 @@ describe('NodeGetSource', () => {
     expect(result.tasks.map(task => task.type).sort()).toEqual(['ping', 'tcp_ping'])
     expect(new Set(result.tasks.map(task => task.id)).size).toBe(2)
     expect(result.tasks.find(task => task.type === 'ping')?.loss).toBe(50)
-    expect(result.tasks.find(task => task.type === 'ping')?.weight).toBe(0)
-    expect(result.tasks.find(task => task.type === 'tcp_ping')?.weight).toBe(1)
+    expect(result.tasks.map(task => task.weight).sort()).toEqual([0, 1])
+  })
+
+  it('ranks the largest task family first without matching protocol or location names', async () => {
+    const caller: NodeGetCaller = {
+      async call<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+        if (method === 'agent-uuid_list_all')
+          return [TEST_UUID] as T
+        if (method === 'task_query') {
+          const condition = (params.task_data_query as { condition: Array<Record<string, unknown>> }).condition
+          const type = condition.find(item => typeof item.type === 'string')?.type
+          const names = type === 'tcp_ping'
+            ? ['route-alpha', 'route-beta', 'route-gamma']
+            : ['route-delta', 'route-epsilon']
+          return names.map((name, index) => ({
+            uuid: TEST_UUID,
+            timestamp: Date.now() - index * 1_000,
+            success: true,
+            cron_source: name,
+            task_event_result: { [String(type)]: 20 + index },
+          })) as T
+        }
+        throw new Error(`Unexpected method: ${method}`)
+      },
+      close() {},
+    }
+    const source = new NodeGetSource('Fixture', 'wss://nodeget.example/nodeget/rpc', caller)
+    const tasks = await source.getPingTasks()
+
+    expect(tasks.filter(task => task.type === 'tcp_ping').map(task => task.weight)).toEqual([0, 0, 0])
+    expect(tasks.filter(task => task.type === 'ping').map(task => task.weight)).toEqual([1, 1])
   })
 })

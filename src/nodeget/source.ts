@@ -60,10 +60,6 @@ const TRAFFIC_PERIOD_CACHE_TTL_MS = 60_000
 const TRAFFIC_PERIOD_RETRY_MS = 15_000
 const PING_TASK_DISCOVERY_WINDOW_MS = 3_600_000
 const PING_TASK_FALLBACK_WINDOW_MS = 24 * 3_600_000
-const PING_TASK_TYPE_WEIGHT: Record<string, number> = {
-  ping: 0,
-  tcp_ping: 1,
-}
 const TRAFFIC_LIMIT_TYPES = new Set(['sum', 'max', 'min', 'up', 'down'])
 const METRIC_AGGREGATIONS = new Set([
   'avg',
@@ -1374,14 +1370,13 @@ export class NodeGetSource {
 
   private tasksFromRows(rows: TaskRow[]): KomariPingTask[] {
     const grouped = groupBy(rows, row => row.taskId)
-    return [...grouped.entries()].map(([id, taskRows]) => {
+    const tasks = [...grouped.entries()].map(([id, taskRows]): KomariPingTask => {
       const first = taskRows[0]!
       const values = taskRows.map(row => row.value)
       const valid = values.filter(value => value >= 0)
       const loss = values.length ? (values.length - valid.length) / values.length * 100 : 0
       return {
         id,
-        weight: PING_TASK_TYPE_WEIGHT[first.type] ?? 2,
         name: first.name,
         clients: [...new Set(taskRows.map(row => row.uuid))].sort(),
         default_on: true,
@@ -1397,7 +1392,26 @@ export class NodeGetSource {
           : {}),
         total: values.length,
       }
-    }).sort((left, right) => left.id - right.id)
+    })
+
+    // Keep automatic defaults within one probe family without favoring a specific protocol.
+    const rankedTypes = [...groupBy(tasks, task => task.type).entries()]
+      .map(([type, typeTasks]) => ({
+        type,
+        taskCount: typeTasks.length,
+        clientCount: new Set(typeTasks.flatMap(task => task.clients)).size,
+        firstTaskId: Math.min(...typeTasks.map(task => task.id)),
+      }))
+      .sort((left, right) => (
+        right.taskCount - left.taskCount
+        || right.clientCount - left.clientCount
+        || left.firstTaskId - right.firstTaskId
+      ))
+    const weightByType = new Map(rankedTypes.map((entry, index) => [entry.type, index]))
+
+    return tasks
+      .map(task => ({ ...task, weight: weightByType.get(task.type) ?? rankedTypes.length }))
+      .sort((left, right) => left.id - right.id)
   }
 
   private pingBasicInfo(records: KomariPingRecord[]): KomariPingBasicInfo[] {
