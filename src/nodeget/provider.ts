@@ -67,9 +67,8 @@ function fulfilledOrThrow<T>(results: PromiseSettledResult<T>[]): T[] {
 function automaticHomepagePingBindings(tasks: KomariPingTask[]): Record<string, string[]> {
   const bindings = Object.create(null) as Record<string, string[]>
   const assignedClients = new Set<string>()
-  const typePriority = (type: string): number => type === 'ping' ? 0 : type === 'tcp_ping' ? 1 : 2
   const prioritized = [...tasks].sort((left, right) => (
-    typePriority(left.type) - typePriority(right.type) || left.id - right.id
+    (left.weight ?? left.id) - (right.weight ?? right.id) || left.id - right.id
   ))
 
   for (const task of prioritized) {
