@@ -132,6 +132,7 @@ export interface KomariPingRecord {
 
 export interface KomariPingTask {
   id: number
+  weight?: number
   name: string
   clients: string[]
   default_on: boolean
