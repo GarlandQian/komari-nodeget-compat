@@ -527,5 +527,7 @@ describe('NodeGetSource', () => {
     expect(result.tasks.map(task => task.type).sort()).toEqual(['ping', 'tcp_ping'])
     expect(new Set(result.tasks.map(task => task.id)).size).toBe(2)
     expect(result.tasks.find(task => task.type === 'ping')?.loss).toBe(50)
+    expect(result.tasks.find(task => task.type === 'ping')?.weight).toBe(0)
+    expect(result.tasks.find(task => task.type === 'tcp_ping')?.weight).toBe(1)
   })
 })
