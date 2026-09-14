@@ -676,12 +676,13 @@ describe('NodeGetSource', () => {
         if (method === 'task_query') {
           const condition = (params.task_data_query as { condition: Array<Record<string, unknown>> }).condition
           const type = condition.find(item => typeof item.type === 'string')?.type
+          const [, queryEnd] = condition.find(item => Array.isArray(item.timestamp_from_to))!.timestamp_from_to as [number, number]
           const names = type === 'tcp_ping'
             ? ['route-alpha', 'route-beta', 'route-gamma']
             : ['route-delta', 'route-epsilon']
           return names.map((name, index) => ({
             uuid: TEST_UUID,
-            timestamp: Date.now() - index * 1_000,
+            timestamp: queryEnd - (index + 1) * 1_000,
             success: true,
             cron_source: name,
             task_event_result: { [String(type)]: 20 + index },
