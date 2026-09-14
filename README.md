@@ -67,7 +67,7 @@ https://<WORKER_DOMAIN>/themes/github/<OWNER>/<REPOSITORY>/latest
 - 主题未提供设置定义，或包含多行文本、数组、对象等复杂字段时，显示 NodeGet 原生 JSON 编辑器，保留完整值和额外配置。
 - ACG 开关添加的背景字段若不在表单中，也自动改用 JSON，避免下一次保存把背景配置删掉。
 
-当前 LuminaPlus、Glassmorphism 和 GlassOps 都使用 JSON 编辑；这是由各自清单内容决定的通用规则。JSON 顶层为设置对象，不要把整个对象再包成字符串；布尔值写 `true` / `false`，数字不加引号，多行字符串使用 `\n`。主题默认值会保留；无清单定义的设置需按上游文档添加，适配器不会猜测字段或伪造登录以启用原 Komari 管理页。
+当前 LuminaPlus、Lumina、Glassmorphism 和 GlassOps 都使用 JSON 编辑；这是由各自清单内容决定的通用规则。JSON 顶层为设置对象，不要把整个对象再包成字符串；布尔值写 `true` / `false`，数字不加引号，多行字符串使用 `\n`。主题默认值会保留；无清单定义的设置需按上游文档添加，适配器不会猜测字段或伪造登录以启用原 Komari 管理页。
 
 从 `0.4.12` 及更早版本升级到 `0.4.13` 时，在 NodeGet 执行一次“从远程更新”，并将“主题配置（user_preferences）”和“Token（site_tokens）”均设为“保留旧配置”。主题文件及新的设置清单会更新，现有配置和授权保留。仅刷新页面能取得新的运行时，但不会更新已经安装的设置表单。无需删除 R2 文件。
 
@@ -149,6 +149,8 @@ ACG_BACKGROUND_ENABLED=true
 本地调试时可以复制 `.dev.vars.example` 为 `.dev.vars` 并修改值；`.dev.vars` 已被 Git 忽略。
 
 背景来自 [夜轻随机二次元图片 API](https://blog.yeqing.net/acg-api/)。开启后，Worker 通过固定的 `/api/acg-background` 接口代理图片，并同时写入 Glassmorphism/GlassOps 使用的 `backgroundEnabled`、`lightBackgroundUrl`、`darkBackgroundUrl` 以及 LuminaPlus 使用的 `backgroundMediaType`、`backgroundImage`、`backgroundImageMobile`；关闭时不会请求上游。图片本身不进入仓库、R2 或转换产物，该服务不保证 SLA，转换器始终保留纯色回退。
+
+图片能否显示仍取决于原主题是否实现相应背景设置。例如 Lumina `v1.1.6` 不读取这些图片背景字段；即使配置已保存，也不会因此获得图片背景功能。
 
 已经安装的主题不会因环境变量变化而被静默改写。开启后请在 NodeGet 中执行“从远程更新”，并在更新选项中选择“主题配置（user_preferences） -> 采用新配置”和“Token（site_tokens） -> 保留旧配置”。这样会载入 ACG 默认值，同时保留现有服务器授权；不要把 Token 选为“采用新配置”，因为公开转换包故意提供空的 `site_tokens`。也可以保留全部旧配置，然后在主题设置中手动启用背景并填写：
 
