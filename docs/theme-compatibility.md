@@ -4,12 +4,12 @@
 
 以下版本使用真实 GitHub Release ZIP 完成了清单转换、本地 NodeGet ZIP 生成、资源路径扫描和公共 API/RPC 调用覆盖核对：
 
-| 主题 | 核对版本 | 原始主题设置 | 0.4.13 设置编辑方式 |
+| 主题 | 核对版本 | 原始主题设置 | 0.4.14 设置编辑方式 |
 | --- | --- | --- | --- |
-| `sanrokamlan-prog/komari-theme-Glassmorphism` | `v3.3.7` | 48 项，含多行文本 | 原生 JSON，保留全部默认值 |
-| `schmidttt/komari-glassops` | `v1.0.9` | 46 项，含多行文本 | 原生 JSON，保留全部默认值 |
-| `shanyang242/Komari-Theme-LuminaPlus` | `v1.3.3` | 清单无设置定义 | 原生 JSON，可按上游文档添加字段 |
-| `stqfdyr/komari-theme-Lumina` | `v1.1.6` | 清单无设置定义 | 原生 JSON，布尔值及首页 Ping 绑定对象保持原类型 |
+| `sanrokamlan-prog/komari-theme-Glassmorphism` | `v3.3.7` | 48 项，含多行文本 | 原生表单，其中 7 项单独填写 JSON |
+| `schmidttt/komari-glassops` | `v1.0.9` | 46 项，含多行文本 | 原生表单，其中 7 项单独填写 JSON |
+| `shanyang242/Komari-Theme-LuminaPlus` | `v1.3.3` | 清单无设置定义 | 基础表单和“额外主题设置”，不提供完整专有表单 |
+| `stqfdyr/komari-theme-Lumina` | `v1.1.6` | 清单无设置定义 | 基础表单和“额外主题设置”，对象保持原类型 |
 
 公共读取接口由统一适配器实现，转换检查与回归测试覆盖包契约、配置往返、HTTP 缺省参数、Ping 失败样本、查询截断和公共设置恢复；这些检查不等于对所有主题界面做了完整浏览器验收。后台管理、登录、终端、插件和写操作仍不支持，即使上游包包含这些入口也会被明确拒绝。
 
@@ -23,7 +23,7 @@
 4. 验证入口已注入兼容运行时并引用固定 `v2` Release 资源。
 5. 实际读取一个固定资源，确认 Worker 到 R2 的读取路径可用。
 6. ACG 开启时，验证 Glassmorphism/GlassOps 与 LuminaPlus 使用的背景配置别名都已注入。
-7. 核对设置表单能够保留配置中的全部字段和类型，拒绝会在保存时删除字段或损坏多行内容的转换包；输出实际使用的 form / JSON 编辑方式。
+7. 核对原生表单与“额外主题设置”入口已发布；部署传播期间有界重试旧清单。检查新生成配置的全部字段和类型可在原生表单保存，复杂字段已编码为单行 JSON；输出 form 编辑方式。这不涵盖任意旧安装的配置迁移。
 
 新增兼容主题只需更新 GitHub Actions 变量中的仓库白名单并重新部署。workflow 失败时先看 `Prewarm and verify remote themes` 步骤；它会指出具体仓库和缺失的转换契约。
 

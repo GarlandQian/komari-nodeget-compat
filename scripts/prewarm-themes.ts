@@ -1,4 +1,4 @@
-import { formCanStorePreference } from '../src/converter/preferences'
+import { EXTRA_THEME_SETTINGS_KEY, formCanStorePreference } from '../src/converter/preferences'
 
 const REQUIRED_THEME_FILES = [
   'nodeget-theme.json',
@@ -13,6 +13,7 @@ interface PrewarmOptions {
   expectedBackgroundEnabled?: boolean
   fetcher?: typeof fetch
   log?: (message: string) => void
+  wait?: (milliseconds: number) => Promise<void>
 }
 
 function deploymentBaseUrl(value: string): string {
@@ -85,7 +86,7 @@ function objectValue(value: unknown): Record<string, unknown> {
 function verifyPreferenceEditor(manifest: Record<string, unknown>, config: Record<string, unknown>, repository: string): void {
   const items = objectValue(manifest.user_preferences_form).items
   if (!Array.isArray(items) || !items.length)
-    return
+    throw new Error(`${repository} does not expose the native settings form`)
   const fields = new Map(items.flatMap((item) => {
     const field = objectValue(item)
     return typeof field.key === 'string' && field.type !== 'title' ? [[field.key, field] as const] : []
@@ -99,6 +100,24 @@ function verifyPreferenceEditor(manifest: Record<string, unknown>, config: Recor
   }
 }
 
+async function currentManifest(
+  fetcher: typeof fetch,
+  themeBase: string,
+  repository: string,
+  wait: (milliseconds: number) => Promise<void>,
+): Promise<Record<string, unknown>> {
+  // A successful response may still come from the old Worker during rollout.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const manifest = await jsonObject(await fetchRequired(fetcher, `${themeBase}/nodeget-theme.json`), `${repository} nodeget-theme.json`)
+    const items = objectValue(manifest.user_preferences_form).items
+    if (Array.isArray(items) && items.some(item => objectValue(item).key === EXTRA_THEME_SETTINGS_KEY))
+      return manifest
+    if (attempt < 4)
+      await wait((attempt + 1) * 2_000)
+  }
+  throw new Error(`${repository} still serves an outdated settings form after deployment`)
+}
+
 export async function prewarmThemes(
   deploymentUrl: string,
   allowedRepositories: string | undefined,
@@ -108,6 +127,7 @@ export async function prewarmThemes(
   const repositories = parseAllowedRepositories(allowedRepositories)
   const log = options.log ?? console.log
   const fetcher = options.fetcher ?? fetch
+  const wait = options.wait ?? (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)))
 
   if (!repositories.length) {
     log('No enumerable GitHub theme repositories configured; skipping prewarm')
@@ -117,10 +137,7 @@ export async function prewarmThemes(
   for (const repository of repositories) {
     const [owner, repo] = repository.split('/') as [string, string]
     const themeBase = `${baseUrl}/themes/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/latest`
-    const manifest = await jsonObject(
-      await fetchRequired(fetcher, `${themeBase}/nodeget-theme.json`),
-      `${repository} nodeget-theme.json`,
-    )
+    const manifest = await currentManifest(fetcher, themeBase, repository, wait)
     if (typeof manifest.short !== 'string' || typeof manifest.version !== 'string')
       throw new Error(`${repository} converted manifest is missing short or version`)
     if (manifest.dist_page !== themeBase)

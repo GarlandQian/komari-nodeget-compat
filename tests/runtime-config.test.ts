@@ -9,10 +9,10 @@ const compatManifest = {
   themeSettingArrayKeys: [],
 }
 
-function fixtureFetch(config: unknown): typeof fetch {
+function fixtureFetch(config: unknown, manifest: unknown = compatManifest): typeof fetch {
   return (async (input: RequestInfo | URL) => {
     const pathname = new URL(String(input)).pathname
-    return Response.json(pathname.endsWith('komari-compat.json') ? compatManifest : config)
+    return Response.json(pathname.endsWith('komari-compat.json') ? manifest : config)
   }) as typeof fetch
 }
 
@@ -68,5 +68,35 @@ describe('runtime config', () => {
       invalidManifestFetch,
       new URL('https://theme.example/'),
     )).rejects.toThrow('theme setting keys must be strings')
+  })
+
+  it('accepts optional explicit JSON field types while keeping old manifests valid', async () => {
+    const types = { note: 'string', tasks: 'array', bindings: 'object', count: 'number', enabled: 'boolean', custom: 'any' } as const
+    const config = { site_tokens: [{ backend_url: 'https://nodeget.example', token: 'read-only-token' }] }
+    const loaded = await loadRuntimeConfig(
+      fixtureFetch(config, { ...compatManifest, themeSettingValueTypes: types }),
+      new URL('https://theme.example/'),
+    )
+    expect(loaded.manifest.themeSettingValueTypes).toEqual(types)
+    const legacy = await loadRuntimeConfig(fixtureFetch(config), new URL('https://theme.example/'))
+    expect(legacy.manifest.themeSettingValueTypes).toBeUndefined()
+  })
+
+  it('rejects invalid JSON field metadata and unsafe setting keys', async () => {
+    const config = { site_tokens: [{ backend_url: 'https://nodeget.example', token: 'read-only-token' }] }
+    for (const metadata of [
+      { themeSettingValueTypes: [] },
+      { themeSettingValueTypes: { tasks: 'csv' } },
+      { themeSettingValueTypes: { enabled: false } },
+      { themeSettingValueTypes: JSON.parse('{"__proto__":"object"}') },
+      { themeSettingKeys: ['constructor'] },
+      { themeSettingArrayKeys: ['prototype'] },
+      { themeSettingsDefaults: JSON.parse('{"__proto__":{}}') },
+    ]) {
+      await expect(loadRuntimeConfig(
+        fixtureFetch(config, { ...compatManifest, ...metadata }),
+        new URL('https://theme.example/'),
+      )).rejects.toThrow('komari-compat.json')
+    }
   })
 })

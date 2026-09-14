@@ -36,8 +36,13 @@ describe('manifest conversion', () => {
     expect(converted.nodeget.dist_page).toBe('https://adapter.example/themes/github/test/theme/latest')
     expect(converted.compat.themeSettingsDefaults).toEqual({ dense: true, nodes: ['a', 'b'], palette: 'blue' })
     expect(converted.compat.themeSettingArrayKeys).toEqual(['nodes'])
-    expect(converted.defaultConfig.user_preferences).toMatchObject({ nodes: ['a', 'b'], dense: true })
-    expect(converted.nodeget.user_preferences_form).toMatchObject({ items: [] })
+    expect(converted.defaultConfig.user_preferences).toMatchObject({ nodes: '["a","b"]', dense: true })
+    expect(converted.nodeget.user_preferences_form).toMatchObject({ items: expect.arrayContaining([
+      expect.objectContaining({ key: 'dense', type: 'switch' }),
+      expect.objectContaining({ key: 'palette', type: 'select' }),
+      expect.objectContaining({ key: 'nodes', type: 'string' }),
+    ]) })
+    expect(converted.compat.themeSettingValueTypes).toEqual({ nodes: 'array' })
     expect(converted.warnings.some(warning => warning.includes('nodes'))).toBe(true)
   })
 
@@ -85,7 +90,7 @@ describe('manifest conversion', () => {
     })
     const form = converted.nodeget.user_preferences_form as { items: Array<{ key?: string }> }
     expect(form.items.flatMap(item => item.key ?? [])).toEqual([
-      'site_name', 'site_description', 'dense', 'columns', 'mode', 'heading',
+      'site_name', 'site_description', 'dense', 'columns', 'mode', 'heading', '__komari_extra_settings',
     ])
     expect(converted.defaultConfig.user_preferences).not.toHaveProperty('site_title')
     expect(converted.defaultConfig.user_preferences).not.toHaveProperty('footer')
@@ -98,10 +103,12 @@ describe('manifest conversion', () => {
     })
     const preferences = {
       ...converted.defaultConfig.user_preferences as Record<string, unknown>,
-      showOverview: false,
-      selectedTasks: [42, 43],
-      homepagePingBindings: { 42: ['example-node'] },
-      announcement: 'First line\nSecond line',
+      __komari_extra_settings: JSON.stringify({
+        showOverview: false,
+        selectedTasks: [42, 43],
+        homepagePingBindings: { 42: ['example-node'] },
+        announcement: 'First line\nSecond line',
+      }),
     }
     const saved = saveInNodeGet(converted, preferences)
     expect(saved).toEqual(preferences)
@@ -114,10 +121,10 @@ describe('manifest conversion', () => {
       announcement: 'First line\nSecond line',
       backgroundImage: 'https://adapter.example/api/acg-background',
     })
-    expect(converted.warnings.some(warning => warning.includes('JSON editor'))).toBe(true)
+    expect(converted.warnings.some(warning => warning.includes('additional theme settings'))).toBe(true)
   })
 
-  it('preserves multi-line and object settings instead of exposing a destructive partial form', async () => {
+  it('keeps ordinary controls while roundtripping complex fields through individual single-line inputs', async () => {
     const defaults = { cards: 'memory\ndisk\ntotalTraffic', palette: { accent: '#00aaff' }, tasks: [42, 43] }
     const converted = convertManifests({
       name: 'Structured theme', short: 'Structured', configuration: { data: [
@@ -129,12 +136,23 @@ describe('manifest conversion', () => {
     })
     const config = converted.defaultConfig as unknown as NodeGetThemeConfig
     const saved = saveInNodeGet(converted, { ...config.user_preferences, enabled: false })
-    expect(saved).toMatchObject({ ...defaults, enabled: false })
+    expect(saved).toMatchObject({
+      cards: JSON.stringify(defaults.cards), palette: JSON.stringify(defaults.palette),
+      tasks: JSON.stringify(defaults.tasks), enabled: false,
+    })
+    const form = converted.nodeget.user_preferences_form as { items: Array<{ key?: string, type: string }> }
+    for (const field of form.items) {
+      if (field.key && field.type === 'string') {
+        const rendered = String(saved[field.key]).replace(/[\r\n]/g, '')
+        expect(rendered).toBe(saved[field.key] as string)
+        saved[field.key] = rendered
+      }
+    }
     const provider = new NodeGetMonitorProvider({ ...config, user_preferences: saved }, converted.compat)
     expect((await provider.getPublicInfo()).theme_settings).toEqual({ ...defaults, enabled: false })
   })
 
-  it('uses JSON for multiline string defaults and unknown controls, retaining their original values', () => {
+  it('uses one text field per unsupported control and retains the original value type', async () => {
     for (const field of [
       { key: 'message', type: 'string', default: 'line1\r\nline2' },
       { key: 'custom', type: 'future-control', default: { enabled: false } },
@@ -142,10 +160,19 @@ describe('manifest conversion', () => {
       { key: 'numericChoiceWithoutDefault', type: 'select', options: [1, 2] },
       { key: 'commaChoice', type: 'select', options: ['a,b', 'c'], default: 'a,b' },
       { key: 'objectChoice', type: 'select', options: [{ value: { nested: true } }] },
+      { key: 'nullableNodes', type: 'nodes', default: null },
+      { key: 'emptyNodes', type: 'nodes', default: '' },
+      { key: 'textTasks', type: 'pingtasks', default: '[]' },
     ]) {
       const converted = convertManifests({ name: 'Future', short: 'Future', configuration: { data: [field] } })
-      expect(converted.nodeget.user_preferences_form).toMatchObject({ items: [] })
-      expect(saveInNodeGet(converted, converted.defaultConfig.user_preferences as Record<string, unknown>)[field.key]).toEqual(field.default)
+      expect(converted.nodeget.user_preferences_form).toMatchObject({ items: expect.arrayContaining([
+        expect.objectContaining({ key: field.key, type: 'string' }),
+      ]) })
+      const saved = saveInNodeGet(converted, converted.defaultConfig.user_preferences as Record<string, unknown>)
+      expect(saved[field.key]).toEqual(field.default === undefined ? undefined : JSON.stringify(field.default))
+      const config = JSON.parse(JSON.stringify({ user_preferences: saved, site_tokens: [] }))
+      const info = await new NodeGetMonitorProvider(config, converted.compat).getPublicInfo()
+      expect(info.theme_settings[field.key]).toEqual(field.default)
     }
   })
 

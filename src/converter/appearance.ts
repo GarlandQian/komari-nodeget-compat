@@ -90,20 +90,26 @@ export function applyThemeAppearanceToManifest(
     return manifest
 
   const overrides = preferenceOverrides(appearance)
-  const formFields = new Map(form.items.flatMap(entry => (
-    isRecord(entry) && typeof entry.key === 'string' ? [[entry.key, entry] as const] : []
-  )))
-  if (Object.entries(overrides).some(([key, value]) => {
-    const field = formFields.get(key)
-    return !field || !formCanStorePreference(field, value)
-  })) {
-    // Appearance can introduce settings absent from the source schema. NodeGet
-    // would discard them on the next form save; its JSON editor preserves all.
-    form.items = []
-    manifest.user_preferences_form = form
-    return manifest
+  const items = [...form.items]
+  const existingKeys = new Set(items.flatMap(entry => isRecord(entry) && typeof entry.key === 'string' ? [entry.key] : []))
+  const names: Record<string, string> = {
+    backgroundEnabled: '背景开关',
+    backgroundType: '背景类型',
+    lightBackgroundUrl: '浅色背景地址',
+    darkBackgroundUrl: '深色背景地址',
+    backgroundMediaType: '背景媒体类型',
+    backgroundImage: '背景图片地址',
+    backgroundImageMobile: '手机背景图片地址',
   }
-  form.items = form.items.map((entry) => {
+  const missing = Object.keys(overrides).filter(key => !existingKeys.has(key))
+  if (missing.length) {
+    items.push({ name: '背景配置', type: 'title' })
+    for (const key of missing) {
+      const value = overrides[key]
+      items.push({ key, name: names[key] ?? key, type: typeof value === 'boolean' ? 'switch' : 'string', default: value })
+    }
+  }
+  form.items = items.map((entry) => {
     if (!isRecord(entry))
       return entry
     const converted = { ...entry }
@@ -116,8 +122,14 @@ export function applyThemeAppearanceToManifest(
       && typeof converted.default === 'string') {
       converted.default = nodeGetBrandText(converted.default)
     }
-    if (typeof converted.key === 'string' && converted.key in overrides)
-      converted.default = overrides[converted.key]
+    if (typeof converted.key === 'string' && converted.key in overrides) {
+      const value = overrides[converted.key]
+      if (!formCanStorePreference(converted, value)) {
+        converted.type = typeof value === 'boolean' ? 'switch' : 'string'
+        delete converted.options
+      }
+      converted.default = value
+    }
     return converted
   })
   manifest.user_preferences_form = form

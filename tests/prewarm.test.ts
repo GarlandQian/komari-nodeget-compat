@@ -15,6 +15,15 @@ describe('remote theme deployment prewarm', () => {
   it('validates every critical file after deployment', async () => {
     const base = 'https://worker.example/themes/github/owner/theme/latest'
     const requested: string[] = []
+    const preferences = {
+      __komari_extra_settings: '{}',
+      backgroundEnabled: true,
+      backgroundMediaType: 'image',
+      lightBackgroundUrl: 'https://worker.example/api/acg-background',
+      darkBackgroundUrl: 'https://worker.example/api/acg-background',
+      backgroundImage: 'https://worker.example/api/acg-background',
+      backgroundImageMobile: 'https://worker.example/api/acg-background',
+    }
     const fetcher = (async (input: string | URL | Request) => {
       const url = input instanceof Request ? input.url : String(input)
       requested.push(url)
@@ -24,6 +33,9 @@ describe('remote theme deployment prewarm', () => {
           version: '1.2.3',
           dist_page: base,
           preview: 'preview.png',
+          user_preferences_form: { items: Object.entries(preferences).map(([key, value]) => ({
+            key, type: typeof value === 'boolean' ? 'switch' : 'string', default: value,
+          })) },
         })
       }
       if (url === `${base}/nodeget-theme-files.json`) {
@@ -48,14 +60,7 @@ describe('remote theme deployment prewarm', () => {
       if (url === `${base}/config.json`) {
         return Response.json({
           site_tokens: [],
-          user_preferences: {
-            backgroundEnabled: true,
-            backgroundMediaType: 'image',
-            lightBackgroundUrl: 'https://worker.example/api/acg-background',
-            darkBackgroundUrl: 'https://worker.example/api/acg-background',
-            backgroundImage: 'https://worker.example/api/acg-background',
-            backgroundImageMobile: 'https://worker.example/api/acg-background',
-          },
+          user_preferences: preferences,
         })
       }
       return new Response('not found', { status: 404 })
@@ -72,6 +77,25 @@ describe('remote theme deployment prewarm', () => {
     expect(requested).toContain(`${base}/preview.png`)
     expect(requested).toContain('https://worker.example/themes/github/owner/theme/releases/1/v2/app.js')
     expect(logs[0]).toContain('Prewarmed owner/theme')
+    expect(logs[0]).toContain('settings: form')
+
+    let staleResponses = 0
+    const waits: number[] = []
+    const rollingFetcher = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input) === `${base}/nodeget-theme.json` && staleResponses++ < 2)
+        return Response.json({ short: 'NG-Theme', version: '1.2.3', dist_page: base, user_preferences_form: { items: [] } })
+      return fetcher(input, init)
+    }) as typeof fetch
+    await prewarmThemes('https://worker.example', 'owner/theme', {
+      fetcher: rollingFetcher, wait: async milliseconds => { waits.push(milliseconds) }, log() {},
+    })
+    expect(waits).toEqual([2_000, 4_000])
+    let staleCalls = 0
+    await expect(prewarmThemes('https://worker.example', 'owner/theme', {
+      fetcher: (async () => { staleCalls += 1; return Response.json({ user_preferences_form: { items: [] } }) }) as unknown as typeof fetch,
+      wait: async () => {}, log() {},
+    })).rejects.toThrow('outdated settings form')
+    expect(staleCalls).toBe(5)
   })
 
   it('rejects forms that would delete settings or flatten multiline values', async () => {
@@ -83,7 +107,9 @@ describe('remote theme deployment prewarm', () => {
       const fetcher = (async (input: string | URL | Request) => {
         const url = input instanceof Request ? input.url : String(input)
         if (url === `${base}/nodeget-theme.json`)
-          return Response.json({ short: 'NG-Theme', version: '1', dist_page: base, user_preferences_form: { items: [{ key: 'site_name', type: 'string' }] } })
+          return Response.json({ short: 'NG-Theme', version: '1', dist_page: base, user_preferences_form: { items: [
+            { key: 'site_name', type: 'string' }, { key: '__komari_extra_settings', type: 'string' },
+          ] } })
         if (url === `${base}/nodeget-theme-files.json`)
           return Response.json(['nodeget-theme.json', 'nodeget-theme-files.json', 'index.html', 'komari-nodeget-runtime.js', 'komari-compat.json', 'config.json'])
         if (url === `${base}/index.html`)

@@ -2,50 +2,47 @@
 
 ## 编辑入口
 
-打开 NodeGet“主题管理 → 对应主题 → 用户配置”。适配器按配置能力自动选择原生表单或 JSON 编辑器，不按主题名称判断。
+打开 NodeGet“主题管理 → 对应主题 → 用户配置”。`0.4.14` 保留原生表单，无需安装扩展；普通项使用开关、数字、下拉和文本控件。某个字段复杂时，只有该字段使用 JSON 文本，不会让整份配置退回 JSON 编辑器。
 
-简单 managed 设置可用表单。缺少设置定义、包含多行文本、数组、对象或不能无损映射的字段时，使用原生 JSON。NodeGet 的表单只保存已声明字段，因此不能用几项站点字段代替完整主题配置。
+## 复杂字段怎么填写
 
-JSON 编辑的是整个 `user_preferences` 对象，**不要添加外层 `user_preferences` 或 `site_tokens`**。Token 仍在独立的“Token 授权”页维护。
+NodeGet 的原生输入框是单行的，复杂字段采用 JSON 文本存储，运行时根据转换清单还原类型：
 
-```json
-{
-  "site_name": "NodeGet",
-  "site_description": "我的节点监控"
-}
-```
+| 字段内容 | 输入示例 |
+| --- | --- |
+| 多行文本 | `"第一行\n第二行"` |
+| 文本列表 | `["memory","disk"]` |
+| 数字 ID 列表 | `[42,43]` |
+| 对象 | `{"accent":"#00aaff"}` |
 
-在当前对象中合并需要修改的字段，保留其他已有字段。布尔值为 `true` / `false`，数字不加引号，数组和对象保持结构；字符串换行写作 `\n`。不要把完整配置或嵌套对象再次转成带引号的 JSON 字符串。
+多行文本保留最外层双引号，用 `\n` 表示换行。数组、对象、数字和布尔值不要再包成字符串。新生成配置已填好相应格式；更改某个复杂项只需修改该项输入框。
 
-## 设置字段来自哪里
+## 额外主题设置
 
-有 managed 定义的主题会把全部默认值写入配置，例如 Glassmorphism 和 GlassOps 的卡片列表、公告等多行字段。编辑器会按 JSON 规范保留换行。
-
-没有定义的主题无法自动推断每个设置的名称、范围和含义。参考上游主题文档或设置源码；转换器不会通过执行主题管理代码、伪造登录或增加管理 Token 来猜测设置。
-
-以 LuminaPlus `v1.3.3` 为例，[上游设置源码](https://github.com/shanyang242/Komari-Theme-LuminaPlus/blob/7c8e353d60a219b2d553aea674d3cdb9fc6fe29e/src/utils/themeSettings.ts)定义了背景、布局等字段。以下字段可合并进当前 JSON，地址替换为实际 Worker 域名；ACG 需先通过 GitHub 变量启用并部署：
+“额外主题设置”仅用于表单没有列出的字段，填写一个 JSON 对象。例如：
 
 ```json
-{
-  "enableBackgroundImage": true,
-  "backgroundMediaType": "image",
-  "backgroundImage": "https://<WORKER_DOMAIN>/api/acg-background",
-  "backgroundImageMobile": "https://<WORKER_DOMAIN>/api/acg-background",
-  "surfaceOpacity": 85
-}
+{"customOption":true,"customList":[1,2],"announcement":"第一行\n第二行"}
 ```
 
-这只是文档示例，适配器不会按 LuminaPlus 名称注入专属表单。透明度等取值由原主题解释。后台保存按钮依赖 Komari 管理接口，不能在只读兼容运行时内使用；请在 NodeGet 保存配置后刷新主题。
+留空或填写 `{}` 表示不添加额外设置。保存时对象会合并到主题设置中，原有默认值保留，普通表单的显式字段优先。不要添加外层 `user_preferences` 或 `site_tokens`；Token 仍在独立的“Token 授权”页维护。
 
-## 从旧版本更新
+Glassmorphism、GlassOps 自带 managed 清单，因此可以生成全部已声明设置，各有 7 个复杂项采用单字段 JSON。LuminaPlus、Lumina 没有声明清单，只能提供基础表单和额外设置；背景开关启用时会添加背景控件。适配器不会根据压缩代码猜测全部字段、范围或选项，也不会按主题名称写专属表单。
 
-`0.4.13` 修改了转换后的设置清单。已有远程主题需要做一次“从远程更新”，将以下两项都选为“保留旧配置”：
+例如 LuminaPlus `v1.3.3` 的专有选项可参考[上游设置源码](https://github.com/shanyang242/Komari-Theme-LuminaPlus/blob/7c8e353d60a219b2d553aea674d3cdb9fc6fe29e/src/utils/themeSettings.ts)，将以下值填入“额外主题设置”：
 
-- 主题配置（`user_preferences`）
-- Token（`site_tokens`）
+```json
+{"defaultAppearance":"dark","enableBackgroundImage":true,"surfaceOpacity":85}
+```
 
-更新会更换主题文件及 `nodeget-theme.json`，保留现有设置和授权。只刷新主题页面不能改变 NodeGet 已安装的设置表单。R2 缓存按新的转换版本自动重建，不需要手动删除。
+主题自带的 Komari 后台保存接口仍不开放。Lumina `v1.1.6` 本身不消费图片背景字段，开启 ACG 不能为其增加图片背景功能。
 
-若背景字段此前已经被旧表单删除，保留旧配置不会凭空恢复它们。可在新 JSON 编辑器补回背景字段，或在确认不再需要旧自定义设置时选择采用新的主题配置；Token 仍应保留。
+## 从旧版本恢复表单
 
-`site_name` 控制公开站点名称，主题通常也用它作为页面标题；`site_description` 映射公开描述。不再生成此前没有生效通路的独立“页面标题”和“页脚文本”选项。主题自己定义的同名页脚设置仍可保存、透传。
+在 NodeGet 执行一次“从远程更新”，将“主题配置（user_preferences）”和“Token（site_tokens）”都设为“保留旧配置”。更新后刷新管理面板即可显示新表单，不必删除 R2。
+
+如果以前在 JSON 中手动添加过表单未声明的字段，更新前先复制保存原“用户配置”的对象。更新后，将这份对象粘贴到“额外主题设置”中再保存；这样旧额外字段进入保留通路，普通表单字段仍优先。不要复制包含 Token 的整个 `config.json`。NodeGet 原生表单会删除未声明的顶层字段，适配器无法在它保存后恢复已经删除的内容。
+
+旧多行、数组和对象值在未编辑时通常可以保留；首次编辑复杂项时，应按上表重新填写 JSON 文本。直接编辑旧多行值会被单行输入框移除换行，旧对象可能显示 `[object Object]`。若旧文本原文恰好带一层合法 JSON 引号，例如 `"原文带引号"`，需明确改为 `"\"原文带引号\""` 才能保留原文引号；无法仅凭字符串自动区分新编码与这种旧内容。
+
+只刷新主题页面会更新运行时，但不会更新 NodeGet 已安装的设置清单。此前已被旧表单删除的背景或其他字段，需要重新补回。

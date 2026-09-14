@@ -17,6 +17,7 @@ import type {
   NodeGetThemeConfig,
   PingRecordQuery,
   PingRecordsResult,
+  ThemeSettingValueType,
 } from '../types'
 import type { NodeGetCaller } from './rpc-client'
 import { asStringArray, downsampleGroupsProportionally, finiteNumber, isRecord } from '../shared/utils'
@@ -33,6 +34,8 @@ type CallerFactory = (entry: NodeGetSiteToken) => NodeGetCaller
 const CLIENT_CACHE_TTL_MS = 30_000
 const HOMEPAGE_PING_DISCOVERY_ATTEMPTS = 2
 const HOMEPAGE_PING_DISCOVERY_RETRY_MS = 150
+const EXTRA_SETTINGS_KEY = '__komari_extra_settings'
+const UNSAFE_SETTING_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
 const RESERVED_PREFERENCES = new Set([
   'site_name',
   'site_title',
@@ -40,10 +43,58 @@ const RESERVED_PREFERENCES = new Set([
   'record_preserve_time',
   'ping_record_preserve_time',
   'metric_retention_days',
+  EXTRA_SETTINGS_KEY,
   '__proto__',
   'constructor',
   'prototype',
 ])
+
+function assertSafeSettingValue(value: unknown, settingKey: string): void {
+  if (Array.isArray(value)) {
+    for (const item of value)
+      assertSafeSettingValue(item, settingKey)
+  }
+  else if (isRecord(value)) {
+    for (const [key, nested] of Object.entries(value)) {
+      if (UNSAFE_SETTING_KEYS.has(key))
+        throw new TypeError(`Theme setting "${settingKey}" contains an unsafe key "${key}"`)
+      assertSafeSettingValue(nested, settingKey)
+    }
+  }
+}
+
+function settingValueMatchesType(value: unknown, type: ThemeSettingValueType): boolean {
+  if (type === 'array')
+    return Array.isArray(value)
+  if (type === 'object')
+    return isRecord(value)
+  if (type === 'number')
+    return typeof value === 'number' && Number.isFinite(value)
+  if (type === 'any') {
+    return value === null || typeof value === 'string' || typeof value === 'boolean'
+      || (typeof value === 'number' && Number.isFinite(value)) || Array.isArray(value) || isRecord(value)
+  }
+  return typeof value === type
+}
+
+function decodeThemeSettingValue(value: unknown, type: ThemeSettingValueType, key: string): unknown {
+  let decoded = value
+  if (typeof value === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(value)
+      // A string control also accepts an older installation's unquoted text.
+      decoded = type === 'string' && typeof parsed !== 'string' ? value : parsed
+    }
+    catch {
+      if (type !== 'string')
+        throw new TypeError(`Theme setting "${key}" must contain valid JSON (${type})`)
+    }
+  }
+  if (!settingValueMatchesType(decoded, type))
+    throw new TypeError(`Theme setting "${key}" must be a JSON ${type}`)
+  assertSafeSettingValue(decoded, key)
+  return decoded
+}
 
 function cloneStatus(status: KomariNodeStatus, client: string): KomariNodeStatus {
   return { ...status, client }
@@ -118,17 +169,30 @@ export class NodeGetMonitorProvider implements MonitorProvider {
 
   async getPublicInfo(): Promise<KomariPublicInfo> {
     const preferences = isRecord(this.config.user_preferences) ? this.config.user_preferences : {}
+    const valueTypes = this.manifest.themeSettingValueTypes ?? {}
     const themeSettings = Object.create(null) as Record<string, unknown>
     for (const [key, value] of Object.entries(this.manifest.themeSettingsDefaults)) {
       if (!RESERVED_PREFERENCES.has(key))
         themeSettings[key] = value
     }
+    if (Object.hasOwn(preferences, EXTRA_SETTINGS_KEY)) {
+      const extraValue = preferences[EXTRA_SETTINGS_KEY]
+      const extra = typeof extraValue === 'string' && !extraValue.trim()
+        ? {}
+        : decodeThemeSettingValue(extraValue, 'object', EXTRA_SETTINGS_KEY) as Record<string, unknown>
+      for (const [key, value] of Object.entries(extra)) {
+        if (!RESERVED_PREFERENCES.has(key))
+          themeSettings[key] = value
+      }
+    }
     for (const [key, value] of Object.entries(preferences)) {
       if (RESERVED_PREFERENCES.has(key))
         continue
-      themeSettings[key] = this.manifest.themeSettingArrayKeys.includes(key) && !Array.isArray(value)
-        ? asStringArray(value)
-        : value
+      themeSettings[key] = Object.hasOwn(valueTypes, key)
+        ? decodeThemeSettingValue(value, valueTypes[key]!, key)
+        : this.manifest.themeSettingArrayKeys.includes(key) && !Array.isArray(value)
+          ? asStringArray(value)
+          : value
     }
     if (this.sources.length && !hasHomepagePingAssignments(themeSettings.homepagePingBindings)) {
       const bindings = await this.getAutomaticHomepagePingBindings()

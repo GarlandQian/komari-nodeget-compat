@@ -1,5 +1,5 @@
 import { describe, expect, it, spyOn } from 'bun:test'
-import type { KomariPingTask } from '../src/types'
+import type { CompatManifest, KomariPingTask, ThemeSettingValueType } from '../src/types'
 import type { NodeGetCaller } from '../src/nodeget/rpc-client'
 import { NodeGetRpcError } from '../src/nodeget/rpc-client'
 import { NodeGetMonitorProvider } from '../src/nodeget/provider'
@@ -10,6 +10,10 @@ const manifest = {
   themeSettingsDefaults: { sourceDefault: true },
   themeSettingKeys: ['sourceDefault'],
   themeSettingArrayKeys: [],
+}
+
+function settingsProvider(preferences: Record<string, unknown>, overrides: Partial<CompatManifest> = {}): NodeGetMonitorProvider {
+  return new NodeGetMonitorProvider({ user_preferences: preferences, site_tokens: [] }, { ...manifest, ...overrides })
 }
 
 function monitoringCaller(uuid: string, historicalRows: Array<Record<string, unknown>> = []): NodeGetCaller {
@@ -63,6 +67,130 @@ describe('NodeGetMonitorProvider', () => {
     })
     expect(info.theme_settings).not.toHaveProperty('site_name')
     expect(info.theme_settings).not.toHaveProperty('metric_retention_days')
+  })
+
+  it('decodes only explicitly marked JSON fields while preserving multiline text, false, zero and task ID types', async () => {
+    const preferences = {
+      note: JSON.stringify('First line\nSecond line'),
+      tasks: '[42,43]',
+      homepagePingBindings: '{"42":["saved-node"]}',
+      count: '0',
+      enabled: 'false',
+      custom: '{"color":"blue","ranks":[1,2]}',
+      ordinaryText: '{"not":"decoded"}',
+      legacyTasks: '42,43',
+    }
+    const info = await settingsProvider(preferences, {
+      themeSettingArrayKeys: ['tasks', 'legacyTasks'],
+      themeSettingValueTypes: {
+        note: 'string', tasks: 'array', homepagePingBindings: 'object', count: 'number', enabled: 'boolean', custom: 'any',
+      },
+    }).getPublicInfo()
+    expect(info.theme_settings).toEqual({
+      sourceDefault: true,
+      note: 'First line\nSecond line',
+      tasks: [42, 43],
+      homepagePingBindings: { 42: ['saved-node'] },
+      count: 0,
+      enabled: false,
+      custom: { color: 'blue', ranks: [1, 2] },
+      ordinaryText: preferences.ordinaryText,
+      legacyTasks: ['42', '43'],
+    })
+  })
+
+  it('keeps existing native settings and unquoted string values when JSON field metadata is introduced', async () => {
+    const preferences = {
+      note: 'An older\nmultiline message',
+      tasks: [42, 43],
+      bindings: { 42: ['saved-node'] },
+      count: 0,
+      enabled: false,
+      custom: { label: 'Existing object' },
+    }
+    const info = await settingsProvider(preferences, {
+      themeSettingValueTypes: { note: 'string', tasks: 'array', bindings: 'object', count: 'number', enabled: 'boolean', custom: 'any' },
+    }).getPublicInfo()
+    expect(info.theme_settings).toMatchObject(preferences)
+    for (const text of ['false', '0', '{"display":"as text"}']) {
+      const legacy = await settingsProvider({ note: text }, { themeSettingValueTypes: { note: 'string' } }).getPublicInfo()
+      expect(legacy.theme_settings.note).toBe(text)
+    }
+  })
+
+  it('reports malformed JSON or wrong declared types instead of silently coercing them', async () => {
+    const invalid: Array<[ThemeSettingValueType, unknown]> = [
+      ['array', '42,43'], ['array', '{"a":1}'], ['object', '[42]'], ['object', 'null'],
+      ['number', '"42"'], ['number', false], ['boolean', '"false"'], ['boolean', 0], ['string', []], ['any', 'not JSON'],
+    ]
+    for (const [type, value] of invalid) {
+      await expect(settingsProvider({ badField: value }, { themeSettingValueTypes: { badField: type } }).getPublicInfo())
+        .rejects.toThrow('Theme setting "badField"')
+    }
+    const legacy = await settingsProvider({ tasks: '42,43' }, { themeSettingArrayKeys: ['tasks'] }).getPublicInfo()
+    expect(legacy.theme_settings.tasks).toEqual(['42', '43'])
+  })
+
+  it('merges extra settings between theme defaults and explicit fields without exposing its container', async () => {
+    const extra = {
+      mode: 'extra', showCosts: false, nested: { labels: ['one', 'two'] }, note: 'Line 1\nLine 2',
+      site_name: 'Cannot replace the public site name', __komari_extra_settings: { hidden: true },
+    }
+    for (const extraValue of [extra, JSON.stringify(extra)]) {
+      const info = await settingsProvider({
+        site_name: 'Saved site', mode: 'explicit', __komari_extra_settings: extraValue, unknownSetting: 0,
+      }, {
+        themeSettingsDefaults: { mode: 'default', defaultOnly: true },
+      }).getPublicInfo()
+      expect(info.sitename).toBe('Saved site')
+      expect(info.theme_settings).toEqual({
+        mode: 'explicit', defaultOnly: true, showCosts: false, nested: { labels: ['one', 'two'] },
+        note: 'Line 1\nLine 2', unknownSetting: 0,
+      })
+      expect(info.theme_settings).not.toHaveProperty('__komari_extra_settings')
+    }
+  })
+
+  it('rejects non-object extra settings and unsafe keys at any nesting depth', async () => {
+    for (const value of ['not JSON', '[]', 'null', 'false', '0', [], null, false, 0]) {
+      await expect(settingsProvider({ __komari_extra_settings: value }).getPublicInfo())
+        .rejects.toThrow('__komari_extra_settings')
+    }
+    for (const value of [
+      '{"__proto__":{"polluted":true}}',
+      '{"palette":{"constructor":{"polluted":true}}}',
+      { list: [{ prototype: { polluted: true } }] },
+    ]) {
+      await expect(settingsProvider({ __komari_extra_settings: value }).getPublicInfo())
+        .rejects.toThrow('unsafe key')
+    }
+    await expect(settingsProvider({ palette: '{"__proto__":{"polluted":true}}' }, {
+      themeSettingValueTypes: { palette: 'object' },
+    }).getPublicInfo()).rejects.toThrow('unsafe key')
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined()
+  })
+
+  it('treats a cleared extra settings input as an empty object', async () => {
+    for (const value of ['', '   ', '\n\t ']) {
+      const info = await settingsProvider({ __komari_extra_settings: value, enabled: false }).getPublicInfo()
+      expect(info.theme_settings).toEqual({ sourceDefault: true, enabled: false })
+    }
+  })
+
+  it('honors decoded or extra homepage Ping assignments before starting automatic discovery', async () => {
+    for (const preferences of [
+      { homepagePingBindings: '{"42":["saved-node"]}' },
+      { __komari_extra_settings: '{"homepagePingBindings":{"42":["saved-node"]}}' },
+    ]) {
+      const provider = new NodeGetMonitorProvider({
+        user_preferences: preferences,
+        site_tokens: [{ name: 'Only', backend_url: 'https://only.example', token: 'token' }],
+      }, { ...manifest, themeSettingValueTypes: { homepagePingBindings: 'object' } })
+      let queries = 0
+      provider.getPingTasks = async () => { queries += 1; return [] }
+      expect((await provider.getPublicInfo()).theme_settings.homepagePingBindings).toEqual({ 42: ['saved-node'] })
+      expect(queries).toBe(0)
+    }
   })
 
   it('automatically exposes homepage Ping bindings from recent scoped history when bindings are empty', async () => {

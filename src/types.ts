@@ -9,6 +9,8 @@ export interface NodeGetThemeConfig {
   site_tokens?: NodeGetSiteToken[]
 }
 
+export type ThemeSettingValueType = 'string' | 'array' | 'object' | 'number' | 'boolean' | 'any'
+
 export interface CompatManifest {
   schema: 1
   source: {
@@ -20,6 +22,7 @@ export interface CompatManifest {
   themeSettingsDefaults: Record<string, unknown>
   themeSettingKeys: string[]
   themeSettingArrayKeys: string[]
+  themeSettingValueTypes?: Record<string, ThemeSettingValueType>
 }
 
 export interface KomariVersionInfo {

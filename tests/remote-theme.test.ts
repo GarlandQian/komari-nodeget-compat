@@ -261,7 +261,7 @@ describe('remote NodeGet theme distribution', () => {
     expect(calls).toEqual({ api: 1, asset: 1 })
     expect(bucket.puts).toBe(3)
     expect([...bucket.objects.keys()].some(key => key.endsWith('/theme.pack'))).toBe(true)
-    expect([...bucket.objects.keys()].some(key => key.includes('/compat-v5/'))).toBe(true)
+    expect([...bucket.objects.keys()].some(key => key.includes('/compat-v6/'))).toBe(true)
     const alias = JSON.parse(await new MemoryObject(bucket.objects.get('aliases/github/test-owner/test-theme/latest.json')!).text())
     expect(alias.schema).toBe(2)
   })
@@ -281,8 +281,8 @@ describe('remote NodeGet theme distribution', () => {
         size: source.byteLength,
       },
       bundle: {
-        packKey: 'bundles/github/test-owner/test-theme/30/compat-v4/theme.pack',
-        indexKey: 'bundles/github/test-owner/test-theme/30/compat-v4/index.json',
+        packKey: 'bundles/github/test-owner/test-theme/30/compat-v5/theme.pack',
+        indexKey: 'bundles/github/test-owner/test-theme/30/compat-v5/index.json',
       },
     }))
     bucket.puts = 0
@@ -294,7 +294,7 @@ describe('remote NodeGet theme distribution', () => {
     )
     expect(response?.status).toBe(200)
     expect(calls).toEqual({ api: 1, asset: 1 })
-    expect([...bucket.objects.keys()].some(key => key.includes('/compat-v5/theme.pack'))).toBe(true)
+    expect([...bucket.objects.keys()].some(key => key.includes('/compat-v6/theme.pack'))).toBe(true)
   })
 
   it('repairs a deleted R2 bundle while the Worker still has warm memory caches', async () => {

@@ -27,7 +27,7 @@ describe('NodeGet theme appearance', () => {
     )
   })
 
-  it('injects ACG defaults and uses JSON when a partial form would discard them', () => {
+  it('adds missing ACG controls so the native form retains background settings', () => {
     const appearance = { backgroundUrl: 'https://adapter.example/api/acg-background' }
     const config = applyThemeAppearanceToConfig({
       user_preferences: { site_name: 'Komari Monitor', backgroundEnabled: false },
@@ -61,7 +61,10 @@ describe('NodeGet theme appearance', () => {
     expect(manifest.description).toBe('NodeGet theme for operators')
     expect(manifest.repository).toBe('https://github.com/shanyang242/Komari-Theme-LuminaPlus')
     expect(manifest.dist_page).toBe('https://adapter.example/themes/github/example/Komari-Theme/latest')
-    expect(manifest.user_preferences_form).toMatchObject({ items: [] })
+    const form = manifest.user_preferences_form as { items: Array<{ key?: string, type: string, default?: unknown }> }
+    const saved = Object.fromEntries(form.items.filter(item => item.key).map(item => [item.key!, item.default]))
+    expect(saved).toEqual(config.user_preferences as Record<string, unknown>)
+    expect(form.items.find(item => item.key === 'backgroundEnabled')?.type).toBe('switch')
   })
 
   it('preserves a complete background form and applies its deployment defaults', () => {
@@ -77,12 +80,16 @@ describe('NodeGet theme appearance', () => {
     const wrongType = {
       user_preferences_form: { items: source.user_preferences_form.items.map(item => ({ ...item, type: 'string' })) },
     }
-    expect(applyThemeAppearanceToManifest(wrongType, appearance).user_preferences_form).toMatchObject({ items: [] })
+    expect(applyThemeAppearanceToManifest(wrongType, appearance).user_preferences_form).toMatchObject({ items: expect.arrayContaining([
+      expect.objectContaining({ key: 'backgroundEnabled', type: 'switch', default: true }),
+    ]) })
     const wrongOptions = {
       user_preferences_form: { items: source.user_preferences_form.items.map(item => item.key === 'backgroundType'
         ? { ...item, type: 'select', options: 'video,color' }
         : item) },
     }
-    expect(applyThemeAppearanceToManifest(wrongOptions, appearance).user_preferences_form).toMatchObject({ items: [] })
+    expect(applyThemeAppearanceToManifest(wrongOptions, appearance).user_preferences_form).toMatchObject({ items: expect.arrayContaining([
+      expect.objectContaining({ key: 'backgroundType', type: 'string', default: 'image' }),
+    ]) })
   })
 })

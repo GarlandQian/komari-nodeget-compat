@@ -1,8 +1,8 @@
-import type { CompatManifest } from '../types'
+import type { CompatManifest, ThemeSettingValueType } from '../types'
 import { isRecord, localizedText } from '../shared/utils'
 import type { ThemeAppearance } from './appearance'
 import { applyThemeAppearanceToConfig, applyThemeAppearanceToManifest } from './appearance'
-import { formCanStorePreference, formSelectOptions } from './preferences'
+import { EXTRA_THEME_SETTINGS_KEY, formCanStorePreference, formSelectOptions, preferenceValueType } from './preferences'
 
 export interface KomariConfigurationItem {
   key?: string
@@ -50,7 +50,7 @@ export interface ConvertManifestOptions {
   distPage?: string
 }
 
-const STANDARD_KEYS = new Set(['site_name', 'site_title', 'site_description'])
+const STANDARD_KEYS = new Set(['site_name', 'site_title', 'site_description', EXTRA_THEME_SETTINGS_KEY])
 const UNSAFE_SETTING_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
 const DIRECT_TYPES = new Set(['string', 'number', 'select', 'switch', 'title'])
 const ARRAY_TYPES = new Set(['nodes', 'pingtasks'])
@@ -87,7 +87,7 @@ export function convertManifests(
     : []
 
   if (configurationType !== 'managed')
-    warnings.push(`Komari configuration type "${configurationType}" is not executed on NodeGet; use the native JSON settings editor.`)
+    warnings.push(`Komari configuration type "${configurationType}" is not executed on NodeGet; use the additional theme settings field for undeclared options.`)
 
   const convertedItems: NodeGetPreferenceItem[] = [
     { name: 'NodeGet 站点', type: 'title' },
@@ -97,8 +97,13 @@ export function convertManifests(
   const themeSettingsDefaults: Record<string, unknown> = {}
   const themeSettingKeys: string[] = []
   const themeSettingArrayKeys: string[] = []
+  const themeSettingValueTypes: Record<string, ThemeSettingValueType> = {}
+  const formDefaults: Record<string, unknown> = {
+    site_name: sourceName,
+    site_description: sourceDescription,
+    [EXTRA_THEME_SETTINGS_KEY]: '{}',
+  }
   const seenKeys = new Set(STANDARD_KEYS)
-  let requiresJsonEditor = false
 
   if (rawItems.length)
     convertedItems.push({ name: `${sourceName} 主题设置`, type: 'title' })
@@ -139,10 +144,26 @@ export function convertManifests(
     const options = targetType === 'select' ? formSelectOptions(item.options) : undefined
     if (!DIRECT_TYPES.has(sourceType) || !formCanStorePreference({ type: targetType, options }, item.default)
       || (targetType === 'select' && !options)) {
-      requiresJsonEditor = true
-      warnings.push(`Configuration key "${key}" (${sourceType}) requires the native NodeGet JSON editor to preserve its value.`)
+      themeSettingValueTypes[key] = preferenceValueType(item.default, sourceType)
+      const encodedDefault = item.default === undefined ? undefined : JSON.stringify(item.default)
+      if (encodedDefault !== undefined)
+        formDefaults[key] = encodedDefault
+      const formatHelp = themeSettingValueTypes[key] === 'string'
+        ? '此项单独用 JSON 字符串填写，保留外层双引号；换行写 \\n，例如 "第一行\\n第二行"。'
+        : '此项单独填写 JSON 值：数组用 ["a","b"]，对象用 {"key":"value"}，数字和布尔值不加引号。'
+      convertedItems.push(compactPreference({
+        key,
+        name,
+        type: 'string',
+        ...(item.required === undefined ? {} : { required: item.required }),
+        default: encodedDefault,
+        help: [localizedText(item.help, ''), formatHelp].filter(Boolean).join(' '),
+      }))
+      warnings.push(`Configuration key "${key}" (${sourceType}) uses an individual JSON text field because NodeGet has no matching native control.`)
       continue
     }
+    if (item.default !== undefined)
+      formDefaults[key] = item.default
     convertedItems.push(compactPreference({
       key,
       name,
@@ -155,9 +176,19 @@ export function convertManifests(
   }
 
   if (!themeSettingKeys.length) {
-    requiresJsonEditor = true
-    warnings.push('No managed theme setting fields are available; NodeGet will use its native JSON editor.')
+    warnings.push('This theme does not declare managed settings. Basic controls remain available; enter undeclared options in the additional theme settings field.')
   }
+
+  convertedItems.push(
+    { name: '高级配置', type: 'title' },
+    {
+      key: EXTRA_THEME_SETTINGS_KEY,
+      name: '额外主题设置',
+      type: 'string',
+      default: '{}',
+      help: '仅填写表单未列出的主题设置，例如 {"customOption":true}。普通表单字段优先；旧配置中的额外字段请先移入这里再保存。',
+    },
+  )
 
   const short = nodeGetShort(manifest.short)
   const compat: CompatManifest = {
@@ -171,6 +202,7 @@ export function convertManifests(
     themeSettingsDefaults,
     themeSettingKeys,
     themeSettingArrayKeys,
+    themeSettingValueTypes,
   }
   const nodeget = {
     name: `NodeGet ${sourceName}`,
@@ -184,19 +216,21 @@ export function convertManifests(
     preview: previewOutputName(manifest.preview),
     user_preferences_form: {
       version: '1.0.0',
-      // NodeGet saves only fields present in a non-empty form. Never expose a
-      // partial form: it would hide the JSON editor and delete unlisted values.
-      items: requiresJsonEditor ? [] : convertedItems,
+      items: convertedItems,
     },
   }
-  const defaultPreferences = {
-    site_name: sourceName,
-    site_description: sourceDescription,
-    ...themeSettingsDefaults,
-  }
   const defaultConfig = {
-    user_preferences: defaultPreferences,
+    user_preferences: formDefaults,
     site_tokens: [],
+  }
+  // Deployment appearance replaces these defaults with scalar values and native
+  // controls, so an upstream complex-field codec must not reinterpret them.
+  const appearanceDefaults = applyThemeAppearanceToConfig({}, options.appearance).user_preferences as Record<string, unknown>
+  for (const key of Object.keys(appearanceDefaults)) {
+    delete themeSettingValueTypes[key]
+    const index = themeSettingArrayKeys.indexOf(key)
+    if (index >= 0)
+      themeSettingArrayKeys.splice(index, 1)
   }
   return {
     nodeget: applyThemeAppearanceToManifest(nodeget, options.appearance),

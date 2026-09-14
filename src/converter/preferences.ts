@@ -1,4 +1,19 @@
 import { isRecord } from '../shared/utils'
+import type { ThemeSettingValueType } from '../types'
+
+export const EXTRA_THEME_SETTINGS_KEY = '__komari_extra_settings'
+
+export function preferenceValueType(value: unknown, sourceType?: string): ThemeSettingValueType {
+  if (Array.isArray(value) || (value === undefined && (sourceType === 'nodes' || sourceType === 'pingtasks')))
+    return 'array'
+  if (isRecord(value))
+    return 'object'
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'string')
+    return typeof value as 'number' | 'boolean' | 'string'
+  if (sourceType === 'textbox' || sourceType === 'richtext')
+    return 'string'
+  return 'any'
+}
 
 export function formCanStorePreference(field: { type?: unknown, options?: unknown }, value: unknown): boolean {
   if (value === undefined)

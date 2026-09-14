@@ -1,6 +1,9 @@
 import type { CompatManifest, NodeGetThemeConfig } from '../types'
 import { isRecord, normalizeWebSocketUrl } from '../shared/utils'
 
+const UNSAFE_SETTING_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+const SETTING_VALUE_TYPES = new Set(['string', 'array', 'object', 'number', 'boolean', 'any'])
+
 export interface LoadedRuntimeConfig {
   config: NodeGetThemeConfig
   manifest: CompatManifest
@@ -57,6 +60,20 @@ function validateCompatManifest(value: unknown): CompatManifest {
   if (!value.themeSettingKeys.every(key => typeof key === 'string')
     || !value.themeSettingArrayKeys.every(key => typeof key === 'string')) {
     throw new TypeError('komari-compat.json theme setting keys must be strings')
+  }
+  if ([...Object.keys(value.themeSettingsDefaults), ...value.themeSettingKeys, ...value.themeSettingArrayKeys]
+    .some(key => UNSAFE_SETTING_KEYS.has(key))) {
+    throw new TypeError('komari-compat.json contains an unsafe theme setting key')
+  }
+  if (value.themeSettingValueTypes !== undefined) {
+    if (!isRecord(value.themeSettingValueTypes))
+      throw new TypeError('komari-compat.json theme setting value types must be an object')
+    for (const [key, type] of Object.entries(value.themeSettingValueTypes)) {
+      if (UNSAFE_SETTING_KEYS.has(key))
+        throw new TypeError('komari-compat.json contains an unsafe theme setting value type key')
+      if (typeof type !== 'string' || !SETTING_VALUE_TYPES.has(type))
+        throw new TypeError(`komari-compat.json theme setting value type for "${key}" is invalid`)
+    }
   }
   return value as unknown as CompatManifest
 }
