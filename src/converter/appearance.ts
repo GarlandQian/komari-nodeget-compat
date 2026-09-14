@@ -1,4 +1,5 @@
 import { isRecord } from '../shared/utils'
+import { formCanStorePreference } from './preferences'
 
 export interface ThemeAppearance {
   backgroundUrl?: string
@@ -89,6 +90,19 @@ export function applyThemeAppearanceToManifest(
     return manifest
 
   const overrides = preferenceOverrides(appearance)
+  const formFields = new Map(form.items.flatMap(entry => (
+    isRecord(entry) && typeof entry.key === 'string' ? [[entry.key, entry] as const] : []
+  )))
+  if (Object.entries(overrides).some(([key, value]) => {
+    const field = formFields.get(key)
+    return !field || !formCanStorePreference(field, value)
+  })) {
+    // Appearance can introduce settings absent from the source schema. NodeGet
+    // would discard them on the next form save; its JSON editor preserves all.
+    form.items = []
+    manifest.user_preferences_form = form
+    return manifest
+  }
   form.items = form.items.map((entry) => {
     if (!isRecord(entry))
       return entry

@@ -166,12 +166,19 @@ function realtimeRecord(record: KomariStatusRecord | KomariNodeStatus): Record<s
   }
 }
 
-function percentile(values: number[], quantile: number): number | undefined {
-  if (!values.length)
+function percentile(points: Array<{ value: number, count: number }>, quantile: number): number | undefined {
+  if (!points.length)
     return undefined
-  const sorted = [...values].sort((left, right) => left - right)
-  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(quantile * sorted.length) - 1))
-  return sorted[index]
+  const sorted = [...points].sort((left, right) => left.value - right.value)
+  const total = sorted.reduce((sum, point) => sum + point.count, 0)
+  const rank = Math.max(1, Math.ceil(quantile * total))
+  let cumulative = 0
+  for (const point of sorted) {
+    cumulative += point.count
+    if (cumulative >= rank)
+      return point.value
+  }
+  return sorted.at(-1)?.value
 }
 
 function taskIdForSeries(series: MetricSeries): string {
@@ -313,7 +320,7 @@ export class KomariFacade {
       const recentMatch = /^\/api\/recent\/([^/]+)$/.exec(url.pathname)
       if (request.method === 'GET' && recentMatch) {
         const uuid = decodeURIComponent(recentMatch[1]!)
-        const limit = finiteNumber(url.searchParams.get('limit'), 150)
+        const limit = finiteNumber(url.searchParams.get('limit') ?? undefined, 150)
         const records = await this.provider.getRecentRecords(uuid, limit)
         return apiSuccess(records.map(realtimeRecord))
       }
@@ -549,8 +556,8 @@ export class KomariFacade {
     if (type !== 'load' && type !== 'ping')
       throw new RpcFault(-32602, `Invalid record type: ${type}`)
     const uuid = url.searchParams.get('uuid') || undefined
-    const hours = finiteNumber(url.searchParams.get('hours'), 4)
-    const maxCount = finiteNumber(url.searchParams.get('maxCount') ?? url.searchParams.get('max_count'), 6_000)
+    const hours = finiteNumber(url.searchParams.get('hours') ?? undefined, 4)
+    const maxCount = finiteNumber(url.searchParams.get('maxCount') ?? url.searchParams.get('max_count') ?? undefined, 6_000)
     const start = url.searchParams.get('start') || undefined
     const end = url.searchParams.get('end') || undefined
     const loadType = url.searchParams.get('load_type') ?? ''
@@ -607,6 +614,8 @@ export class KomariFacade {
         ? {}
         : { entity_id: params.uuid }),
       metric_keys: ['ping.latency_ms', 'ping.loss'],
+      aggregation: 'avg',
+      aggregation_by_metric: { 'ping.latency_ms': 'avg', 'ping.loss': 'avg' },
       fill_empty: true,
       max_points: maxPoints,
     })
@@ -627,7 +636,14 @@ export class KomariFacade {
         return []
       if (requestedTaskIds.size && !requestedTaskIds.has(taskId))
         return []
-      const valid = series.points.map(point => point.value).filter((value): value is number => typeof value === 'number')
+      const valid = series.points.flatMap((point) => {
+        const count = point.count ?? 1
+        return typeof point.value === 'number' && Number.isFinite(point.value) && point.value >= 0
+          && Number.isFinite(count) && count > 0
+          ? [{ value: point.value, count }]
+          : []
+      })
+      const validCount = valid.reduce((count, point) => count + point.count, 0)
       const lossSeries = lossByKey.get(`${series.entity_id}\u0000${taskId}`)
       const lossPoints = lossSeries?.points.filter((point): point is typeof point & { value: number } => (
         typeof point.value === 'number'
@@ -636,12 +652,13 @@ export class KomariFacade {
       if (total <= 0)
         return []
       const lost = lossPoints.reduce((count, point) => count + point.value * (point.count ?? 1), 0)
+      // Bucket means retain sample weights; distribution statistics remain approximate after downsampling.
       const p50 = percentile(valid, 0.5)
       const p99 = percentile(valid, 0.99)
-      const average = valid.length ? valid.reduce((sum, value) => sum + value, 0) / valid.length : undefined
+      const average = validCount ? valid.reduce((sum, point) => sum + point.value * point.count, 0) / validCount : undefined
       const stddev = average === undefined
         ? undefined
-        : Math.sqrt(valid.reduce((sum, value) => sum + (value - average) ** 2, 0) / valid.length)
+        : Math.sqrt(valid.reduce((sum, point) => sum + (point.value - average) ** 2 * point.count, 0) / validCount)
       const p99P50Ratio = p50 !== undefined && p99 !== undefined && p50 > 0 && p99 >= p50
         ? (p99 - p50) / Math.max(Math.min(p50, 50), 10)
         : 0
@@ -659,10 +676,10 @@ export class KomariFacade {
         p99_p50_ratio: p99P50Ratio,
         ...(valid.length
           ? {
-              min: Math.min(...valid),
-              max: Math.max(...valid),
+              min: Math.min(...valid.map(point => point.value)),
+              max: Math.max(...valid.map(point => point.value)),
               avg: average,
-              latest: valid.at(-1),
+              latest: valid.at(-1)?.value,
               p50,
               p99,
               stddev,

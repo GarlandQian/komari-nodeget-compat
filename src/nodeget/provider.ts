@@ -37,7 +37,6 @@ const RESERVED_PREFERENCES = new Set([
   'site_name',
   'site_title',
   'site_description',
-  'footer',
   'record_preserve_time',
   'ping_record_preserve_time',
   'metric_retention_days',
@@ -101,6 +100,7 @@ export class NodeGetMonitorProvider implements MonitorProvider {
   private readonly publicIdBySourceAndRaw = new Map<string, string>()
   private clientsPromise: Promise<Record<string, KomariClient>> | null = null
   private clientsExpiresAt = 0
+  private homepagePingBindingsPromise: Promise<Record<string, string[]> | null> | null = null
 
   constructor(
     private readonly config: NodeGetThemeConfig,
@@ -126,21 +126,14 @@ export class NodeGetMonitorProvider implements MonitorProvider {
     for (const [key, value] of Object.entries(preferences)) {
       if (RESERVED_PREFERENCES.has(key))
         continue
-      themeSettings[key] = this.manifest.themeSettingArrayKeys.includes(key)
+      themeSettings[key] = this.manifest.themeSettingArrayKeys.includes(key) && !Array.isArray(value)
         ? asStringArray(value)
         : value
     }
-    if (this.sources.length && !hasHomepagePingAssignments(preferences.homepagePingBindings)) {
-      try {
-        const bindings = await this.discoverHomepagePingBindings()
-        if (Object.keys(bindings).length)
-          themeSettings.homepagePingBindings = bindings
-      }
-      catch (error) {
-        if (!isPermissionDenied(error))
-          throw error
-        // Ping permission is optional; public node information remains available without it.
-      }
+    if (this.sources.length && !hasHomepagePingAssignments(themeSettings.homepagePingBindings)) {
+      const bindings = await this.getAutomaticHomepagePingBindings()
+      if (bindings && Object.keys(bindings).length)
+        themeSettings.homepagePingBindings = bindings
     }
 
     return {
@@ -164,6 +157,24 @@ export class NodeGetMonitorProvider implements MonitorProvider {
 
   async getVersion(): Promise<KomariVersionInfo> {
     return { version: '1.3.0-nodeget', hash: 'komari-nodeget-compat' }
+  }
+
+  private getAutomaticHomepagePingBindings(): Promise<Record<string, string[]> | null> {
+    if (!this.homepagePingBindingsPromise) {
+      this.homepagePingBindingsPromise = this.discoverHomepagePingBindings()
+        .catch((error: unknown) => {
+          if (!isPermissionDenied(error)) {
+            // Do not log the backend error: it may contain connection details or credentials.
+            console.warn('[komari-nodeget-compat] Automatic homepage Ping discovery failed; saved theme settings remain available. The next public settings request will retry.')
+          }
+          return null
+        })
+        .finally(() => {
+          // Share in-flight work only. Failed or empty discovery must be able to recover.
+          this.homepagePingBindingsPromise = null
+        })
+    }
+    return this.homepagePingBindingsPromise
   }
 
   private async discoverHomepagePingBindings(): Promise<Record<string, string[]>> {

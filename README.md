@@ -9,7 +9,7 @@
 - 转换根目录包含 `komari-theme.json` 和 `dist/` 的 Komari 主题 ZIP。
 - 生成 `nodeget-theme.json`、`nodeget-theme-files.json`、`config.json` 和 NodeGet 安装 ZIP。
 - 注入公共 HTTP、RPC2 与实时状态兼容运行时，无需主题源码。
-- 转换 Komari managed 主题设置为 NodeGet `user_preferences_form`。
+- 无损转换主题设置：简单 managed 设置使用 NodeGet 表单；缺少定义或包含多行、数组、对象时使用原生 JSON 编辑器。
 - 将主题页面中独立出现的可见 `Komari` 品牌文字转换为 `NodeGet`，保留兼容协议、API 和代码标识中的技术名称。
 - 将 GitHub 最新 Release 映射为稳定的 NodeGet 主题站点 URL，并使用 R2 缓存。
 - 支持多个 NodeGet 站点，并为跨站点节点生成无冲突 ID。
@@ -58,6 +58,20 @@ https://<WORKER_DOMAIN>/themes/github/<OWNER>/<REPOSITORY>/latest
 为避免 NodeGet 串行下载数百个文件导致导入长时间无响应，远程清单只让 NodeGet 保存入口、兼容运行时、配置和预览等少量文件；原主题的 JS、CSS、图片和字体继续从 Worker 的固定 Release 地址加载。固定地址不会随 `latest` 改变，所以已安装版本不会被后续发布破坏。远程安装后的主题需要 Worker 保持可访问；需要完全独立于 Worker 时使用本地 ZIP 转换模式。
 
 上游发布新版后，在 NodeGet 主题管理中点击“从远程更新”即可获取最新版；这不是后台静默自动更新。兼容运行时会从当前 Worker 部署读取，因此即使上游主题 Release 没变，远程更新也能获得适配器修复。完整说明见 [docs/remote-distribution.md](docs/remote-distribution.md)。
+
+## 主题设置与升级
+
+在 NodeGet 的“主题管理 → 对应主题 → 用户配置”中编辑。转换器根据主题清单自动选择编辑方式：
+
+- 只有可无损表达的单行文本、数字、开关和下拉选项时，显示设置表单。
+- 主题未提供设置定义，或包含多行文本、数组、对象等复杂字段时，显示 NodeGet 原生 JSON 编辑器，保留完整值和额外配置。
+- ACG 开关添加的背景字段若不在表单中，也自动改用 JSON，避免下一次保存把背景配置删掉。
+
+当前 LuminaPlus、Glassmorphism 和 GlassOps 都使用 JSON 编辑；这是由各自清单内容决定的通用规则。JSON 顶层为设置对象，不要把整个对象再包成字符串；布尔值写 `true` / `false`，数字不加引号，多行字符串使用 `\n`。主题默认值会保留；无清单定义的设置需按上游文档添加，适配器不会猜测字段或伪造登录以启用原 Komari 管理页。
+
+从 `0.4.12` 及更早版本升级到 `0.4.13` 时，在 NodeGet 执行一次“从远程更新”，并将“主题配置（user_preferences）”和“Token（site_tokens）”均设为“保留旧配置”。主题文件及新的设置清单会更新，现有配置和授权保留。仅刷新页面能取得新的运行时，但不会更新已经安装的设置表单。无需删除 R2 文件。
+
+具体 JSON 示例、配置来源和更新说明见 [docs/theme-settings.md](docs/theme-settings.md)。
 
 ## 本地开发
 

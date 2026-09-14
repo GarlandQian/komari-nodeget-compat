@@ -99,6 +99,37 @@ class FixtureCaller implements NodeGetCaller {
   }
 }
 
+interface ProbeFixture {
+  uuid: string
+  timestamp: number
+  success: boolean
+  cron_source: string
+  task_event_result: { ping: number } | null
+}
+
+class LimitedTaskCaller implements NodeGetCaller {
+  conditions: Array<Array<Record<string, unknown>>> = []
+
+  constructor(private readonly rows: ProbeFixture[]) {}
+
+  async call<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+    if (method !== 'task_query')
+      throw new Error(`Unexpected method: ${method}`)
+    const conditions = (params.task_data_query as { condition: Array<Record<string, unknown>> }).condition
+    this.conditions.push(conditions)
+    const uuid = conditions.find(item => item.uuid)?.uuid
+    const type = conditions.find(item => item.type)?.type
+    const [from, to] = conditions.find(item => item.timestamp_from_to)!.timestamp_from_to as [number, number]
+    const limit = conditions.find(item => item.limit)!.limit as number
+    return (type === 'ping' ? this.rows.filter(row => (!uuid || row.uuid === uuid)
+      && row.timestamp >= from && row.timestamp <= to)
+      .sort((left, right) => right.timestamp - left.timestamp)
+      .slice(0, limit) : []) as T
+  }
+
+  close(): void {}
+}
+
 describe('NodeGetSource', () => {
   it('maps current NodeGet data using only the minimal static fields', async () => {
     const caller = new FixtureCaller()
@@ -476,6 +507,113 @@ describe('NodeGetSource', () => {
     expect(taskConditions.every(condition => condition.every(item => !Object.hasOwn(item, 'uuid')))).toBe(true)
     expect(new Set(result.series.map(series => series.entity_id))).toEqual(new Set(uuids))
     expect(result.series.filter(series => series.metric_key === 'ping.latency_ms')).toHaveLength(2)
+  })
+
+  it('excludes failed probes from latency aggregation while preserving loss sample counts', async () => {
+    const start = Date.parse('2026-08-25T00:00:00.000Z')
+    const caller = new LimitedTaskCaller([20, 40, null, 80].map((value, index) => ({
+      uuid: TEST_UUID,
+      timestamp: start + (index + 1) * 10_000,
+      success: index < 2,
+      cron_source: 'Test Ping',
+      task_event_result: value === null ? null : { ping: value },
+    })))
+    const source = new NodeGetSource('Fixture', 'wss://nodeget.example/nodeget/rpc', caller)
+    const params = {
+      entity_id: TEST_UUID,
+      metric_keys: ['ping.latency_ms', 'ping.loss'],
+      start: new Date(start).toISOString(),
+      end: new Date(start + 60_000).toISOString(),
+      max_points: 1,
+      fill_empty: true,
+    }
+    for (const [aggregation, expected] of [['avg', 30], ['min', 20], ['count', 2]] as const) {
+      const result = await source.queryMetrics({
+        ...params,
+        aggregation_by_metric: { 'ping.latency_ms': aggregation },
+      })
+      const latency = result.series.find(series => series.metric_key === 'ping.latency_ms')!
+      const loss = result.series.find(series => series.metric_key === 'ping.loss')!
+      expect(latency.points.map(point => [point.value, point.count])).toEqual([[expected, 2]])
+      expect(loss.points.map(point => [point.value, point.count])).toEqual([[0.5, 4]])
+    }
+
+    const failed = await source.queryMetrics({ ...params, start: new Date(start + 25_000).toISOString() })
+    expect(failed.series.find(series => series.metric_key === 'ping.latency_ms')!.points[0]).toMatchObject({ value: null, count: 0 })
+    expect(failed.series.find(series => series.metric_key === 'ping.loss')!.points[0]).toMatchObject({ value: 1, count: 2 })
+
+    const unaggregated = await source.queryMetrics({ ...params, max_points: 10, fill_empty: false })
+    expect(unaggregated.series.find(series => series.metric_key === 'ping.latency_ms')!.points
+      .map(point => [point.value, point.count])).toEqual([[20, 1], [40, 1], [-1, 0], [-1, 0]])
+  })
+
+  it('retrieves full multi-node Ping history after hitting the backend limit without losing split boundaries', async () => {
+    const start = Date.parse('2026-08-25T00:00:00.000Z')
+    const end = start + 3_600_000
+    const uuids = Array.from({ length: 24 }, (_, index) => `synthetic-node-${index}`)
+    const rows: ProbeFixture[] = uuids.flatMap(uuid => Array.from({ length: 3 }, (_, task) => (
+      Array.from({ length: 180 }, (_, index) => ({
+        uuid,
+        timestamp: start + index * 20_000 + 1_000,
+        success: true,
+        cron_source: `Test Ping ${task}`,
+        task_event_result: { ping: 20 },
+      }))
+    )).flat())
+    for (const timestamp of [start, start + 1_800_000, start + 1_800_001, end]) {
+      rows.push({
+        uuid: uuids[0]!, timestamp, success: true, cron_source: 'Test Ping 0', task_event_result: { ping: 20 },
+      })
+    }
+    const caller = new LimitedTaskCaller(rows)
+    const source = new NodeGetSource('Fixture', 'wss://nodeget.example/nodeget/rpc', caller)
+    const params = {
+      metric_keys: ['ping.latency_ms'], start: new Date(start).toISOString(), end: new Date(end).toISOString(), max_points: 500,
+    }
+    const multi = await source.queryMetrics({ ...params, entity_ids: uuids })
+    expect(multi.series.reduce((count, series) => count + series.points.length, 0)).toBe(rows.length)
+    expect(caller.conditions.length).toBeLessThanOrEqual(8)
+    const single = await source.queryMetrics({ ...params, entity_id: uuids[0]! })
+    expect(multi.series.filter(series => series.entity_id === uuids[0])).toEqual(single.series)
+  })
+
+  it('fails explicitly and stops refining when one millisecond still fills the task query limit', async () => {
+    const start = Date.parse('2026-08-25T00:00:00.000Z')
+    const rows = Array.from({ length: 10_001 }, (_, index) => ({
+      uuid: TEST_UUID, timestamp: start + 30_000, success: true,
+      cron_source: `Test Ping ${index}`, task_event_result: { ping: 20 },
+    }))
+    const caller = new LimitedTaskCaller(rows)
+    const source = new NodeGetSource('Fixture', 'wss://nodeget.example/nodeget/rpc', caller)
+    await expect(source.queryMetrics({
+      entity_ids: [TEST_UUID, 'synthetic-other-node'], metric_keys: ['ping.latency_ms'],
+      start: new Date(start).toISOString(), end: new Date(start + 60_000).toISOString(),
+    })).rejects.toThrow('NodeGet Ping history exceeds the query limit')
+    expect(caller.conditions.length).toBeLessThan(40)
+    expect(caller.conditions.every(conditions => conditions.every(condition => !Object.hasOwn(condition, 'uuid')))).toBe(true)
+  })
+
+  it('does not hide a failed refinement behind a successful empty query for the other task protocol', async () => {
+    const start = Date.parse('2026-08-25T00:00:00.000Z')
+    const end = start + 60_000
+    const rows = Array.from({ length: 10_001 }, (_, index) => ({
+      uuid: TEST_UUID, timestamp: start + index + 1, success: true,
+      cron_source: 'Test Ping', task_event_result: { ping: 20 },
+    }))
+    class FailingSplitCaller extends LimitedTaskCaller {
+      override async call<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+        const conditions = (params.task_data_query as { condition: Array<Record<string, unknown>> }).condition
+        const range = conditions.find(condition => condition.timestamp_from_to)!.timestamp_from_to as [number, number]
+        if (range[1] - range[0] < end - start)
+          throw new Error('temporary history failure')
+        return super.call<T>(method, params)
+      }
+    }
+    const source = new NodeGetSource('Fixture', 'wss://nodeget.example/nodeget/rpc', new FailingSplitCaller(rows))
+    await expect(source.getPingRecords({
+      uuid: TEST_UUID, hours: 1, maxCount: 100,
+      start: new Date(start).toISOString(), end: new Date(end).toISOString(),
+    })).rejects.toThrow('NodeGet Ping history could not be loaded completely')
   })
 
   it('deduplicates concurrent Ping task discovery scans', async () => {

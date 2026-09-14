@@ -1,3 +1,5 @@
+import { formCanStorePreference } from '../src/converter/preferences'
+
 const REQUIRED_THEME_FILES = [
   'nodeget-theme.json',
   'nodeget-theme-files.json',
@@ -80,6 +82,23 @@ function objectValue(value: unknown): Record<string, unknown> {
     : {}
 }
 
+function verifyPreferenceEditor(manifest: Record<string, unknown>, config: Record<string, unknown>, repository: string): void {
+  const items = objectValue(manifest.user_preferences_form).items
+  if (!Array.isArray(items) || !items.length)
+    return
+  const fields = new Map(items.flatMap((item) => {
+    const field = objectValue(item)
+    return typeof field.key === 'string' && field.type !== 'title' ? [[field.key, field] as const] : []
+  }))
+  for (const [key, value] of Object.entries(objectValue(config.user_preferences))) {
+    const field = fields.get(key)
+    if (!field)
+      throw new Error(`${repository} preference "${key}" would be deleted when the NodeGet form is saved`)
+    if (!formCanStorePreference(field, value))
+      throw new Error(`${repository} preference "${key}" cannot be edited losslessly by the NodeGet form`)
+  }
+}
+
 export async function prewarmThemes(
   deploymentUrl: string,
   allowedRepositories: string | undefined,
@@ -134,6 +153,7 @@ export async function prewarmThemes(
       await fetchRequired(fetcher, `${themeBase}/config.json`),
       `${repository} config.json`,
     )
+    verifyPreferenceEditor(manifest, config, repository)
     if (options.expectedBackgroundEnabled) {
       const preferences = objectValue(config.user_preferences)
       const expectedUrl = `${baseUrl}/api/acg-background`
@@ -146,7 +166,9 @@ export async function prewarmThemes(
         throw new Error(`${repository} ACG background aliases were not injected into config.json`)
       }
     }
-    log(`Prewarmed ${repository} (${String(manifest.short)} ${String(manifest.version)})`)
+    const formItems = objectValue(manifest.user_preferences_form).items
+    const editor = Array.isArray(formItems) && formItems.length ? 'form' : 'JSON'
+    log(`Prewarmed ${repository} (${String(manifest.short)} ${String(manifest.version)}; settings: ${editor})`)
   }
 
   return repositories

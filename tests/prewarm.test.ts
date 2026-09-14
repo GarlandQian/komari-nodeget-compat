@@ -73,4 +73,27 @@ describe('remote theme deployment prewarm', () => {
     expect(requested).toContain('https://worker.example/themes/github/owner/theme/releases/1/v2/app.js')
     expect(logs[0]).toContain('Prewarmed owner/theme')
   })
+
+  it('rejects forms that would delete settings or flatten multiline values', async () => {
+    const base = 'https://worker.example/themes/github/owner/theme/latest'
+    for (const fixture of [
+      { preferences: { site_name: 'Theme', backgroundImage: 'https://example.com/background.png' }, error: 'would be deleted' },
+      { preferences: { site_name: 'First line\nSecond line' }, error: 'cannot be edited losslessly' },
+    ]) {
+      const fetcher = (async (input: string | URL | Request) => {
+        const url = input instanceof Request ? input.url : String(input)
+        if (url === `${base}/nodeget-theme.json`)
+          return Response.json({ short: 'NG-Theme', version: '1', dist_page: base, user_preferences_form: { items: [{ key: 'site_name', type: 'string' }] } })
+        if (url === `${base}/nodeget-theme-files.json`)
+          return Response.json(['nodeget-theme.json', 'nodeget-theme-files.json', 'index.html', 'komari-nodeget-runtime.js', 'komari-compat.json', 'config.json'])
+        if (url === `${base}/index.html`)
+          return new Response('<script src="./komari-nodeget-runtime.js"></script><script src="https://worker.example/themes/github/owner/theme/releases/1/v2/app.js"></script>')
+        if (url === `${base}/config.json`)
+          return Response.json({ site_tokens: [], user_preferences: fixture.preferences })
+        return new Response('/* asset */')
+      }) as typeof fetch
+      await expect(prewarmThemes('https://worker.example', 'owner/theme', { fetcher, log() {} }))
+        .rejects.toThrow(fixture.error)
+    }
+  })
 })

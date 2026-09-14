@@ -2,6 +2,7 @@ import type { CompatManifest } from '../types'
 import { isRecord, localizedText } from '../shared/utils'
 import type { ThemeAppearance } from './appearance'
 import { applyThemeAppearanceToConfig, applyThemeAppearanceToManifest } from './appearance'
+import { formCanStorePreference, formSelectOptions } from './preferences'
 
 export interface KomariConfigurationItem {
   key?: string
@@ -49,7 +50,7 @@ export interface ConvertManifestOptions {
   distPage?: string
 }
 
-const STANDARD_KEYS = new Set(['site_name', 'site_title', 'site_description', 'footer'])
+const STANDARD_KEYS = new Set(['site_name', 'site_title', 'site_description'])
 const UNSAFE_SETTING_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
 const DIRECT_TYPES = new Set(['string', 'number', 'select', 'switch', 'title'])
 const ARRAY_TYPES = new Set(['nodes', 'pingtasks'])
@@ -86,19 +87,18 @@ export function convertManifests(
     : []
 
   if (configurationType !== 'managed')
-    warnings.push(`Komari configuration type "${configurationType}" is not executable on NodeGet; defaults only will be used.`)
+    warnings.push(`Komari configuration type "${configurationType}" is not executed on NodeGet; use the native JSON settings editor.`)
 
   const convertedItems: NodeGetPreferenceItem[] = [
     { name: 'NodeGet 站点', type: 'title' },
     { key: 'site_name', name: '站点标题', type: 'string', default: sourceName, help: '公开页面站点名称' },
-    { key: 'site_title', name: '页面标题', type: 'string', default: sourceName, help: '浏览器标签页标题' },
     { key: 'site_description', name: '站点描述', type: 'string', default: sourceDescription },
-    { key: 'footer', name: '页脚文本', type: 'string', default: 'Powered by NodeGet' },
   ]
   const themeSettingsDefaults: Record<string, unknown> = {}
   const themeSettingKeys: string[] = []
   const themeSettingArrayKeys: string[] = []
   const seenKeys = new Set(STANDARD_KEYS)
+  let requiresJsonEditor = false
 
   if (rawItems.length)
     convertedItems.push({ name: `${sourceName} 主题设置`, type: 'title' })
@@ -135,25 +135,12 @@ export function convertManifests(
     if (item.default !== undefined)
       themeSettingsDefaults[key] = item.default
 
-    const targetType = DIRECT_TYPES.has(sourceType)
-      ? sourceType as NodeGetPreferenceItem['type']
-      : 'string'
-    if (targetType !== sourceType)
-      warnings.push(`Configuration key "${key}" (${sourceType}) was downgraded to a string field.`)
-    const defaultValue = ARRAY_TYPES.has(sourceType) && Array.isArray(item.default)
-      ? item.default.join(',')
-      : item.default
-    const options = targetType === 'select' ? convertOptions(item.options) : undefined
-    if (targetType === 'select' && !options) {
-      warnings.push(`Configuration key "${key}" has no usable select options and was downgraded to string.`)
-      convertedItems.push(compactPreference({
-        key,
-        name,
-        type: 'string',
-        ...(item.required === undefined ? {} : { required: item.required }),
-        default: defaultValue,
-        help: localizedText(item.help, ''),
-      }))
+    const targetType = sourceType as NodeGetPreferenceItem['type']
+    const options = targetType === 'select' ? formSelectOptions(item.options) : undefined
+    if (!DIRECT_TYPES.has(sourceType) || !formCanStorePreference({ type: targetType, options }, item.default)
+      || (targetType === 'select' && !options)) {
+      requiresJsonEditor = true
+      warnings.push(`Configuration key "${key}" (${sourceType}) requires the native NodeGet JSON editor to preserve its value.`)
       continue
     }
     convertedItems.push(compactPreference({
@@ -162,9 +149,14 @@ export function convertManifests(
       type: targetType,
       ...(item.required === undefined ? {} : { required: item.required }),
       ...(options === undefined ? {} : { options }),
-      default: defaultValue,
+      default: item.default,
       help: localizedText(item.help, ''),
     }))
+  }
+
+  if (!themeSettingKeys.length) {
+    requiresJsonEditor = true
+    warnings.push('No managed theme setting fields are available; NodeGet will use its native JSON editor.')
   }
 
   const short = nodeGetShort(manifest.short)
@@ -192,14 +184,16 @@ export function convertManifests(
     preview: previewOutputName(manifest.preview),
     user_preferences_form: {
       version: '1.0.0',
-      items: convertedItems,
+      // NodeGet saves only fields present in a non-empty form. Never expose a
+      // partial form: it would hide the JSON editor and delete unlisted values.
+      items: requiresJsonEditor ? [] : convertedItems,
     },
   }
-  const defaultPreferences = Object.fromEntries(convertedItems.flatMap((item) => {
-    if (!item.key || item.default === undefined)
-      return []
-    return [[item.key, item.default]]
-  }))
+  const defaultPreferences = {
+    site_name: sourceName,
+    site_description: sourceDescription,
+    ...themeSettingsDefaults,
+  }
   const defaultConfig = {
     user_preferences: defaultPreferences,
     site_tokens: [],
@@ -222,22 +216,6 @@ export function previewOutputName(preview: string | undefined): string {
 function nodeGetShort(sourceShort: string): string {
   const safe = sourceShort.replaceAll(/[^A-Za-z0-9_-]/g, '-').replaceAll(/-+/g, '-').replace(/^-|-$/g, '')
   return `NG-${safe || 'KomariTheme'}`
-}
-
-function convertOptions(value: unknown): string | undefined {
-  if (typeof value === 'string')
-    return value.trim() || undefined
-  if (!Array.isArray(value))
-    return undefined
-  const options = value.flatMap((item): string[] => {
-    if (typeof item === 'string' || typeof item === 'number')
-      return [String(item)]
-    if (!isRecord(item))
-      return []
-    const optionValue = item.value ?? item.key ?? item.label ?? item.name
-    return optionValue == null ? [] : [String(optionValue)]
-  })
-  return options.length ? options.join(',') : undefined
 }
 
 function compactPreference(item: NodeGetPreferenceItem): NodeGetPreferenceItem {

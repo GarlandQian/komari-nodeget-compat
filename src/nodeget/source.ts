@@ -61,6 +61,8 @@ const TRAFFIC_PERIOD_CACHE_TTL_MS = 60_000
 const TRAFFIC_PERIOD_RETRY_MS = 15_000
 const PING_TASK_DISCOVERY_WINDOW_MS = 3_600_000
 const PING_TASK_FALLBACK_WINDOW_MS = 24 * 3_600_000
+const TASK_QUERY_LIMIT = 10_000
+const TASK_QUERY_MAX_SPLIT_REQUESTS = 128
 const TRAFFIC_LIMIT_TYPES = new Set(['sum', 'max', 'min', 'up', 'down'])
 const METRIC_AGGREGATIONS = new Set([
   'avg',
@@ -146,6 +148,15 @@ interface TaskRow {
 interface RawTaskRow {
   row: Record<string, unknown>
   requestedType: string
+}
+
+class TaskQueryIncompleteError extends Error {
+  override name = 'TaskQueryIncompleteError'
+}
+
+interface TaskQueryBudget {
+  remainingSplits: number
+  failure?: TaskQueryIncompleteError
 }
 
 interface RawTrafficState {
@@ -601,10 +612,17 @@ function downsampleMetricPoints(
     const values = buckets.get(bucket)
     if (!values?.length)
       continue
+    // Failed probes are represented by -1 in the legacy data. Only successful
+    // latency samples participate in aggregation; the loss series counts all probes.
+    const aggregateValues = metricKey === 'ping.latency_ms'
+      ? values.filter(point => typeof point.value === 'number' && point.value >= 0)
+      : values
     sampled.push({
       time: new Date(start + bucket * intervalMs).toISOString(),
-      value: aggregateMetricValue(values, aggregation),
-      count: values.reduce((count, point) => count + (point.count ?? 1), 0),
+      value: metricKey === 'ping.latency_ms' && !aggregateValues.length && aggregation !== 'count' && !fillEmpty
+        ? -1
+        : aggregateMetricValue(aggregateValues, aggregation),
+      count: aggregateValues.reduce((count, point) => count + (point.count ?? 1), 0),
     })
   }
   const filled = adaptivelyFillMetricPoints(sampled, metricKey, start, end, fillEmpty, intervalMs)
@@ -887,6 +905,8 @@ export class NodeGetSource {
       globalQuerySucceeded = true
     }
     catch (error) {
+      if (error instanceof TaskQueryIncompleteError)
+        throw error
       firstFailure = error
     }
 
@@ -900,6 +920,8 @@ export class NodeGetSource {
       )))
       for (const result of results) {
         if (result.status === 'rejected') {
+          if (result.reason instanceof TaskQueryIncompleteError)
+            throw result.reason
           firstFailure ??= result.reason
           continue
         }
@@ -1037,7 +1059,9 @@ export class NodeGetSource {
             row => row.uuid,
           )
         }
-        catch {
+        catch (error) {
+          if (error instanceof TaskQueryIncompleteError)
+            throw error
           rowsByEntity = new Map(await Promise.all(entityIds.map(async uuid => [
             uuid,
             await this.queryTaskRows(uuid, start, end),
@@ -1076,7 +1100,7 @@ export class NodeGetSource {
             const rawPoints: MetricPoint[] = taskRows.map(row => ({
               time: new Date(row.timestamp).toISOString(),
               value: metricKey === 'ping.loss' ? (row.value < 0 ? 1 : 0) : row.value,
-              count: 1,
+              count: metricKey === 'ping.latency_ms' && row.value < 0 ? 0 : 1,
             }))
             const aggregation = metricAggregation(params, metricKey)
             const maxPoints = metricMaxPoints(params, metricKey)
@@ -1302,33 +1326,24 @@ export class NodeGetSource {
       windows.push({ from, to: Math.min(end, from + windowMs) })
 
     const rawRows: RawTaskRow[] = []
+    const budget: TaskQueryBudget = { remainingSplits: TASK_QUERY_MAX_SPLIT_REQUESTS }
     let successfulQueries = 0
     let firstFailure: unknown
     for (let index = 0; index < windows.length; index += 4) {
-      const batch = windows.slice(index, index + 4).flatMap(({ from, to }) => ['ping', 'tcp_ping'].map((type) => {
-        const condition: Record<string, unknown>[] = []
-        if (uuid)
-          condition.push({ uuid })
-        condition.push(
-          { type },
-          { timestamp_from_to: [from, to] },
-          { limit: 10_000 },
-        )
-        return this.rpc.call<unknown>('task_query', { task_data_query: { condition } })
-          .then(response => ({ requestedType: type, response }))
-      }))
+      const batch = windows.slice(index, index + 4).flatMap(({ from, to }) => ['ping', 'tcp_ping'].map(type => (
+        this.queryTaskWindow(uuid, type, from, to, budget)
+      )))
 
       for (const result of await Promise.allSettled(batch)) {
         if (result.status === 'rejected') {
+          if (result.reason instanceof TaskQueryIncompleteError)
+            throw result.reason
           firstFailure ??= result.reason
           continue
         }
         successfulQueries += 1
-        const { requestedType, response } = result.value
-        for (const row of arrayPayload(response)) {
-          if (isRecord(row))
-            rawRows.push({ row, requestedType })
-        }
+        for (const row of result.value)
+          rawRows.push(row)
       }
     }
     if (windows.length && successfulQueries === 0)
@@ -1362,11 +1377,59 @@ export class NodeGetSource {
         type,
         name,
         taskId,
-        value: typeof valueCandidate === 'number' && Number.isFinite(valueCandidate) ? valueCandidate : -1,
+        value: !failed && typeof valueCandidate === 'number' && Number.isFinite(valueCandidate) && valueCandidate >= 0
+          ? valueCandidate
+          : -1,
       })
     }
 
     return [...unique.values()].sort((left, right) => left.timestamp - right.timestamp)
+  }
+
+  private async queryTaskWindow(
+    uuid: string | undefined,
+    type: string,
+    from: number,
+    to: number,
+    budget: TaskQueryBudget,
+  ): Promise<RawTaskRow[]> {
+    if (budget.failure)
+      throw budget.failure
+    const condition: Record<string, unknown>[] = []
+    if (uuid)
+      condition.push({ uuid })
+    condition.push({ type }, { timestamp_from_to: [from, to] }, { limit: TASK_QUERY_LIMIT })
+    const response = await this.rpc.call<unknown>('task_query', { task_data_query: { condition } })
+    const rows = arrayPayload(response)
+    if (budget.failure)
+      throw budget.failure
+    if (rows.length < TASK_QUERY_LIMIT) {
+      return rows.flatMap((row): RawTaskRow[] => isRecord(row) ? [{ row, requestedType: type }] : [])
+    }
+
+    // NodeGet uses inclusive integer millisecond bounds and caps each result at
+    // 10,000. A full response cannot establish completeness, even at exactly 10,000.
+    if (from >= to || budget.remainingSplits < 2) {
+      budget.failure = new TaskQueryIncompleteError(
+        'NodeGet Ping history exceeds the query limit; narrow the time range or query fewer nodes',
+      )
+      throw budget.failure
+    }
+    budget.remainingSplits -= 2
+    const midpoint = Math.floor(from + (to - from) / 2)
+    try {
+      // Keep each split sequential so refinement does not increase the existing
+      // eight-request concurrency limit. The budget is shared by all time windows.
+      const left = await this.queryTaskWindow(uuid, type, from, midpoint, budget)
+      const right = await this.queryTaskWindow(uuid, type, midpoint + 1, to, budget)
+      return [...left, ...right]
+    }
+    catch (error) {
+      budget.failure ??= error instanceof TaskQueryIncompleteError
+        ? error
+        : new TaskQueryIncompleteError('NodeGet Ping history could not be loaded completely; retry the query')
+      throw budget.failure
+    }
   }
 
   private tasksFromRows(rows: TaskRow[]): KomariPingTask[] {

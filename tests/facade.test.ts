@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test'
+import { describe, expect, it, spyOn } from 'bun:test'
 import { KomariFacade } from '../src/komari/facade'
 import { FakeMonitorProvider, TEST_UUID } from './fixtures'
 
@@ -10,6 +10,56 @@ describe('KomariFacade', () => {
     const body = await response!.json() as any
     expect(body.status).toBe('success')
     expect(body.data.sitename).toBe('Test Site')
+  })
+
+  it('uses the same recent-record limit for HTTP and RPC, including an omitted limit', async () => {
+    const provider = new FakeMonitorProvider()
+    const recent = spyOn(provider, 'getRecentRecords')
+    const facade = new KomariFacade(provider)
+    for (const limit of [undefined, 25, 0]) {
+      const query = limit === undefined ? '' : `?limit=${limit}`
+      const http = await facade.handleHttp(new Request(`https://theme.example/api/recent/${TEST_UUID}${query}`))
+      expect(http?.status).toBe(200)
+      expect(recent).toHaveBeenLastCalledWith(TEST_UUID, limit ?? 150)
+      await facade.handleRpcPayload({
+        jsonrpc: '2.0', id: 1, method: 'common:getNodeRecentStatus',
+        params: { uuid: TEST_UUID, ...(limit === undefined ? {} : { limit }) },
+      })
+      expect(recent).toHaveBeenLastCalledWith(TEST_UUID, limit ?? 150)
+    }
+  })
+
+  it('preserves HTTP history defaults and count aliases with the matching public RPC semantics', async () => {
+    const provider = new FakeMonitorProvider()
+    const load = spyOn(provider, 'getLoadRecords')
+    const ping = spyOn(provider, 'getPingRecords')
+    const facade = new KomariFacade(provider)
+    const cases = [
+      { query: '', params: {}, hours: 4, maxCount: 6_000 },
+      { query: '&hours=12', params: { hours: 12 }, hours: 12, maxCount: 6_000 },
+      { query: '&max_count=200', params: { max_count: 200 }, hours: 4, maxCount: 200 },
+      { query: '&hours=12&max_count=200', params: { hours: 12, max_count: 200 }, hours: 12, maxCount: 200 },
+      { query: '&hours=8&maxCount=300', params: { hours: 8, maxCount: 300 }, hours: 8, maxCount: 300 },
+      { query: '&hours=0&maxCount=0', params: { hours: 0, maxCount: 0 }, hours: 0, maxCount: 0 },
+    ]
+    for (const type of ['load', 'ping'] as const) {
+      const records = type === 'load' ? load : ping
+      const method = type === 'load' ? 'public:getRecordsByUUID' : 'public:getPingRecords'
+      for (const entry of cases) {
+        const http = await facade.handleHttp(new Request(
+          `https://theme.example/api/records/${type}?uuid=${TEST_UUID}${entry.query}`,
+        ))
+        expect(http?.status).toBe(200)
+        const expected = { uuid: TEST_UUID, hours: entry.hours, maxCount: entry.maxCount }
+        expect(records).toHaveBeenLastCalledWith(expected)
+        const body = await http!.json() as any
+        expect(Date.parse(body.data.to) - Date.parse(body.data.from)).toBe(Math.max(1, entry.hours) * 3_600_000)
+        await facade.handleRpcPayload({
+          jsonrpc: '2.0', id: 1, method, params: { uuid: TEST_UUID, ...entry.params },
+        })
+        expect(records).toHaveBeenLastCalledWith(expected)
+      }
+    }
   })
 
   it('hard-rejects administrative HTTP and RPC operations', async () => {
@@ -49,6 +99,48 @@ describe('KomariFacade', () => {
     }) as any
     expect(stats.result.stats[0].loss).toBe(50)
     expect(stats.result.stats[0].avg).toBe(20)
+  })
+
+  it('weights Ping latency statistics by successful samples and requests mean aggregation', async () => {
+    const provider = new FakeMonitorProvider()
+    const result = await provider.queryMetrics({})
+    const metrics = spyOn(provider, 'queryMetrics').mockResolvedValue({
+      ...result,
+      series: result.series.map(series => ({
+        ...series,
+        downsampled: true,
+        count: 3,
+        points: series.metric_key === 'ping.latency_ms'
+          ? [
+              { time: '2026-08-25T12:00:00.000Z', value: 10, count: 9 },
+              { time: '2026-08-25T12:01:00.000Z', value: 100, count: 1 },
+              { time: '2026-08-25T12:02:00.000Z', value: -1, count: 0 },
+            ]
+          : [
+              { time: '2026-08-25T12:00:00.000Z', value: 0, count: 9 },
+              { time: '2026-08-25T12:01:00.000Z', value: 0.5, count: 2 },
+              { time: '2026-08-25T12:02:00.000Z', value: 1, count: 2 },
+            ],
+      })),
+    })
+    const facade = new KomariFacade(provider)
+    const response = await facade.handleRpcPayload({
+      jsonrpc: '2.0', id: 2, method: 'public:getPingMetricStats',
+      params: {
+        entity_id: TEST_UUID,
+        aggregation: 'sum',
+        aggregation_by_metric: { 'ping.latency_ms': 'max', 'ping.loss': 'count' },
+      },
+    }) as any
+    expect(metrics.mock.calls[0]?.[0]).toMatchObject({
+      aggregation: 'avg',
+      aggregation_by_metric: { 'ping.latency_ms': 'avg', 'ping.loss': 'avg' },
+    })
+    expect(response.result.stats[0]).toMatchObject({
+      total: 13, valid: 10, min: 10, max: 100, avg: 19,
+      latest: 100, p50: 10, p99: 100, stddev: 27, loss_approximate: true,
+    })
+    expect(response.result.stats[0].loss).toBeCloseTo(3 / 13 * 100)
   })
 
   it('supports version aliases, single-node lookup, and audit no-op', async () => {

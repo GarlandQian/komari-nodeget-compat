@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'bun:test'
+import { describe, expect, it, spyOn } from 'bun:test'
+import type { KomariPingTask } from '../src/types'
 import type { NodeGetCaller } from '../src/nodeget/rpc-client'
 import { NodeGetRpcError } from '../src/nodeget/rpc-client'
 import { NodeGetMonitorProvider } from '../src/nodeget/provider'
@@ -56,11 +57,11 @@ describe('NodeGetMonitorProvider', () => {
     expect(info.metric_retention_days).toBe(30)
     expect(info.theme_settings).toEqual({
       sourceDefault: true,
+      footer: 'Footer',
       backgroundMediaType: 'image',
       backgroundImage: 'https://adapter.example/api/acg-background',
     })
     expect(info.theme_settings).not.toHaveProperty('site_name')
-    expect(info.theme_settings).not.toHaveProperty('footer')
     expect(info.theme_settings).not.toHaveProperty('metric_retention_days')
   })
 
@@ -157,16 +158,10 @@ describe('NodeGetMonitorProvider', () => {
     expect(Object.values(bindings)).toEqual([[uuid]])
   })
 
-  it('only suppresses homepage Ping discovery errors caused by missing permissions', async () => {
+  it('keeps public theme settings available without Ping permission', async () => {
     const permissionDenied: NodeGetCaller = {
       async call(): Promise<never> {
         throw new NodeGetRpcError('Permission denied: missing Task::Query permission', 102)
-      },
-      close() {},
-    }
-    const unavailable: NodeGetCaller = {
-      async call(): Promise<never> {
-        throw new Error('backend temporarily unavailable')
       },
       close() {},
     }
@@ -176,19 +171,112 @@ describe('NodeGetMonitorProvider', () => {
 
     const publicInfo = await new NodeGetMonitorProvider(config, manifest, () => permissionDenied).getPublicInfo()
     expect(publicInfo.theme_settings).not.toHaveProperty('homepagePingBindings')
-    await expect(new NodeGetMonitorProvider(config, manifest, () => unavailable).getPublicInfo())
-      .rejects.toThrow('backend temporarily unavailable')
+    expect(publicInfo.theme_settings.sourceDefault).toBe(true)
   })
 
   it('preserves explicit homepage Ping bindings without requiring Ping permission', async () => {
     const configured = { 42: ['saved-node'] }
     const provider = new NodeGetMonitorProvider({
       user_preferences: { homepagePingBindings: configured },
-      site_tokens: [],
+      site_tokens: [{ name: 'Only', backend_url: 'https://only.example', token: 'token' }],
     }, manifest)
+    let queries = 0
+    provider.getPingTasks = async () => {
+      queries += 1
+      throw new Error('Ping must not be queried for explicit bindings')
+    }
 
     const info = await provider.getPublicInfo()
     expect(info.theme_settings.homepagePingBindings).toEqual(configured)
+    expect(queries).toBe(0)
+  })
+
+  it('preserves typed defaults and numeric task arrays from the JSON settings editor', async () => {
+    const configured = { 42: ['saved-node'] }
+    const provider = new NodeGetMonitorProvider({
+      user_preferences: { pingTargets: [42, 43], legacyNodes: 'node-a,node-b', announcement: '{not JSON}' },
+      site_tokens: [{ name: 'Only', backend_url: 'https://only.example', token: 'token' }],
+    }, {
+      ...manifest,
+      themeSettingsDefaults: { homepagePingBindings: configured, footer: 'Theme footer' },
+      themeSettingArrayKeys: ['pingTargets', 'legacyNodes'],
+    })
+    let queries = 0
+    provider.getPingTasks = async () => {
+      queries += 1
+      throw new Error('Ping must not be queried for default bindings')
+    }
+
+    const info = await provider.getPublicInfo()
+    expect(info.theme_settings).toEqual({
+      homepagePingBindings: configured,
+      footer: 'Theme footer',
+      pingTargets: [42, 43],
+      legacyNodes: ['node-a', 'node-b'],
+      announcement: '{not JSON}',
+    })
+    expect(queries).toBe(0)
+  })
+
+  it('returns saved theme settings during Ping failure and retries discovery on the next request', async () => {
+    const task: KomariPingTask = {
+      id: 42, name: 'Recovery Ping', type: 'icmp', default_on: true,
+      clients: ['saved-node'], interval: 60,
+    }
+    const provider = new NodeGetMonitorProvider({
+      user_preferences: { site_name: 'Saved site', showPingChart: false, homepagePingBindings: {} },
+      site_tokens: [{ name: 'Only', backend_url: 'https://only.example', token: 'token' }],
+    }, manifest)
+    let attempts = 0
+    provider.getPingTasks = async () => {
+      attempts += 1
+      if (attempts <= 2)
+        throw new Error('private backend details must not be logged')
+      return [task]
+    }
+    const warning = spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const failed = await provider.getPublicInfo()
+      expect(failed.sitename).toBe('Saved site')
+      expect(failed.theme_settings).toMatchObject({ sourceDefault: true, showPingChart: false, homepagePingBindings: {} })
+      expect(warning).toHaveBeenCalledTimes(1)
+      expect(String(warning.mock.calls[0])).toContain('next public settings request will retry')
+      expect(String(warning.mock.calls[0])).not.toContain('private backend details')
+
+      const recovered = await provider.getPublicInfo()
+      expect(recovered.theme_settings.homepagePingBindings).toEqual({ 42: ['saved-node'] })
+      expect(attempts).toBe(3)
+    }
+    finally {
+      warning.mockRestore()
+    }
+  })
+
+  it('shares concurrent Ping discovery and does not permanently cache an empty result', async () => {
+    const task: KomariPingTask = {
+      id: 42, name: 'New Ping', type: 'icmp', default_on: true,
+      clients: ['saved-node'], interval: 60,
+    }
+    const provider = new NodeGetMonitorProvider({
+      site_tokens: [{ name: 'Only', backend_url: 'https://only.example', token: 'token' }],
+    }, manifest)
+    let completeDiscovery!: (tasks: KomariPingTask[]) => void
+    const pending = new Promise<KomariPingTask[]>((resolve) => { completeDiscovery = resolve })
+    let queries = 0
+    provider.getPingTasks = async () => {
+      queries += 1
+      return queries === 1 ? pending : [task]
+    }
+    const first = provider.getPublicInfo()
+    const second = provider.getPublicInfo()
+    expect(queries).toBe(1)
+    completeDiscovery([])
+    for (const info of await Promise.all([first, second]))
+      expect(info.theme_settings).not.toHaveProperty('homepagePingBindings')
+
+    const recovered = await provider.getPublicInfo()
+    expect(recovered.theme_settings.homepagePingBindings).toEqual({ 42: ['saved-node'] })
+    expect(queries).toBe(2)
   })
 
   it('keeps healthy NodeGet sources available when another source is offline', async () => {

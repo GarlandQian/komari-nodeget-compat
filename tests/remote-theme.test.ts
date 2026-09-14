@@ -257,12 +257,11 @@ describe('remote NodeGet theme distribution', () => {
       lightBackgroundUrl: 'https://adapter.example/api/acg-background',
       darkBackgroundUrl: 'https://adapter.example/api/acg-background',
       site_name: 'NodeGet Remote Fixture',
-      site_title: 'NodeGet Remote Fixture',
     })
     expect(calls).toEqual({ api: 1, asset: 1 })
     expect(bucket.puts).toBe(3)
     expect([...bucket.objects.keys()].some(key => key.endsWith('/theme.pack'))).toBe(true)
-    expect([...bucket.objects.keys()].some(key => key.includes('/compat-v4/'))).toBe(true)
+    expect([...bucket.objects.keys()].some(key => key.includes('/compat-v5/'))).toBe(true)
     const alias = JSON.parse(await new MemoryObject(bucket.objects.get('aliases/github/test-owner/test-theme/latest.json')!).text())
     expect(alias.schema).toBe(2)
   })
@@ -271,7 +270,7 @@ describe('remote NodeGet theme distribution', () => {
     const source = sourceTheme()
     const bucket = new MemoryBucket()
     await bucket.put('aliases/github/test-owner/test-theme/latest.json', JSON.stringify({
-      schema: 1,
+      schema: 2,
       checkedAt: 1_000_000,
       repository: 'test-owner/test-theme',
       release: { id: 20, tag: 'v2.0.0', publishedAt: '2026-08-25T12:00:00Z' },
@@ -282,8 +281,8 @@ describe('remote NodeGet theme distribution', () => {
         size: source.byteLength,
       },
       bundle: {
-        packKey: 'bundles/github/test-owner/test-theme/30/theme.pack',
-        indexKey: 'bundles/github/test-owner/test-theme/30/index.json',
+        packKey: 'bundles/github/test-owner/test-theme/30/compat-v4/theme.pack',
+        indexKey: 'bundles/github/test-owner/test-theme/30/compat-v4/index.json',
       },
     }))
     bucket.puts = 0
@@ -295,7 +294,7 @@ describe('remote NodeGet theme distribution', () => {
     )
     expect(response?.status).toBe(200)
     expect(calls).toEqual({ api: 1, asset: 1 })
-    expect([...bucket.objects.keys()].some(key => key.includes('/compat-v4/theme.pack'))).toBe(true)
+    expect([...bucket.objects.keys()].some(key => key.includes('/compat-v5/theme.pack'))).toBe(true)
   })
 
   it('repairs a deleted R2 bundle while the Worker still has warm memory caches', async () => {
