@@ -467,7 +467,7 @@ describe('NodeGetSource', () => {
     expect(result.tasks[0]?.type).toBe('ping')
   })
 
-  it('shares one global Ping query across multiple metric entities', async () => {
+  it('scopes Ping metric queries to each requested entity', async () => {
     const uuids = [
       '11111111-1111-4111-8111-111111111111',
       '22222222-2222-4222-8222-222222222222',
@@ -503,8 +503,8 @@ describe('NodeGetSource', () => {
       max_points: 24,
     })
 
-    expect(taskConditions).toHaveLength(2)
-    expect(taskConditions.every(condition => condition.every(item => !Object.hasOwn(item, 'uuid')))).toBe(true)
+    expect(taskConditions).toHaveLength(4)
+    expect(taskConditions.every(condition => condition.some(item => uuids.includes(String(item.uuid))))).toBe(true)
     expect(new Set(result.series.map(series => series.entity_id))).toEqual(new Set(uuids))
     expect(result.series.filter(series => series.metric_key === 'ping.latency_ms')).toHaveLength(2)
   })

@@ -148,6 +148,7 @@ function isPermissionDenied(error: unknown): boolean {
 
 export class NodeGetMonitorProvider implements MonitorProvider {
   private readonly historyRequests = new HistoryRequestScheduler()
+  private readonly taskSources = new Map<number, string>()
   private readonly sources: NodeGetSource[]
   private readonly routes = new Map<string, ClientRoute>()
   private readonly publicIdBySourceAndRaw = new Map<string, string>()
@@ -167,6 +168,7 @@ export class NodeGetMonitorProvider implements MonitorProvider {
         entry.backend_url,
         createCaller(entry),
         this.historyRequests,
+        this.taskSources,
       ))
   }
 
@@ -388,10 +390,11 @@ export class NodeGetMonitorProvider implements MonitorProvider {
 
   async queryMetrics(params: MetricQueryParams): Promise<MetricQueryResult> {
     await this.ensureRoutes()
+    const requestedId = params.entity_id || params.uuid
     const requestedIds = [...new Set((params.entity_ids?.length
       ? params.entity_ids
-      : params.entity_id
-        ? [params.entity_id]
+      : requestedId
+        ? [requestedId]
         : [...this.routes.keys()]).map(id => id.trim()).filter(Boolean))]
     const emptyResult = this.sources[0]!.emptyMetricResult(
       params,
@@ -435,6 +438,7 @@ export class NodeGetMonitorProvider implements MonitorProvider {
   }
 
   close(): void {
+    this.taskSources.clear()
     this.historyRequests.close()
     for (const source of this.sources)
       source.close()

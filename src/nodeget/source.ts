@@ -146,9 +146,20 @@ interface TaskRow {
   value: number
 }
 
+interface TaskScope {
+  type: string
+  cronSource?: string
+}
+
+interface TaskIdentity extends TaskScope {
+  taskId: number
+  name: string
+}
+
 interface RawTaskRow {
   row: Record<string, unknown>
   requestedType: string
+  requestedCronSource?: string
 }
 
 class TaskQueryIncompleteError extends Error {
@@ -634,7 +645,7 @@ function downsampleMetricPoints(
   }
 }
 
-function taskMatchesMetricQuery(row: TaskRow, params: MetricQueryParams): boolean {
+function taskMatchesMetricQuery(row: Pick<TaskRow, 'taskId' | 'name' | 'type'>, params: MetricQueryParams): boolean {
   const requestedTaskIds = [params.task_id, ...(params.task_ids ?? [])]
     .filter(value => value !== undefined && value !== null && value !== '')
     .map(String)
@@ -681,12 +692,14 @@ export class NodeGetSource {
   private trafficPeriodRefreshPromise: Promise<void> | null = null
   private pingTaskCache: { expiresAt: number, tasks: KomariPingTask[] } | null = null
   private pingTaskRefreshPromise: Promise<KomariPingTask[]> | null = null
+  private readonly taskIdentities = new Map<number, TaskIdentity>()
 
   constructor(
     name: string,
     backendUrl: string,
     private readonly rpc: NodeGetCaller,
     private readonly historyRequests = new HistoryRequestScheduler(),
+    private readonly taskSources = new Map<number, string>(),
   ) {
     this.name = name || 'NodeGet'
     this.key = sourceKey(this.name, backendUrl)
@@ -862,7 +875,13 @@ export class NodeGetSource {
 
   async getPingRecords(query: PingRecordQuery): Promise<PingRecordsResult> {
     const { start, end } = queryRange(query, this.historyRequests.queryTime())
-    const taskRows = await this.queryTaskRows(query.uuid, start, end)
+    const scopes = await this.resolveTaskScopes(
+      query.taskId ? { task_id: query.taskId } : {},
+      query.uuid ? [query.uuid] : undefined,
+      start,
+      end,
+    )
+    const taskRows = await this.queryTaskRows(query.uuid, start, end, 3_600_000, scopes)
     const filteredRows = query.taskId
       ? taskRows.filter(row => row.taskId === query.taskId)
       : taskRows
@@ -994,10 +1013,11 @@ export class NodeGetSource {
       ...(params.end || params.end_time ? { end: params.end ?? params.end_time } : {}),
       hours: params.hours ?? 4,
     }, this.historyRequests.queryTime())
+    const requestedId = params.entity_id || params.uuid
     const requestedEntityIds = params.entity_ids?.length
       ? params.entity_ids
-      : params.entity_id
-        ? [params.entity_id]
+      : requestedId
+        ? [requestedId]
         : Object.keys(this.clientCache).length
           ? Object.keys(this.clientCache)
           : await this.listAgentUuids()
@@ -1052,31 +1072,11 @@ export class NodeGetSource {
 
     const pingMetricKeys = metricKeys.filter(key => key.startsWith('ping.'))
     if (pingMetricKeys.length) {
-      let rowsByEntity: Map<string, TaskRow[]>
-      if (entityIds.length > 1) {
-        try {
-          const requested = new Set(entityIds)
-          const rows = await this.queryTaskRows(undefined, start, end)
-          rowsByEntity = groupBy(
-            rows.filter(row => requested.has(row.uuid)),
-            row => row.uuid,
-          )
-        }
-        catch (error) {
-          if (error instanceof TaskQueryIncompleteError)
-            throw error
-          rowsByEntity = new Map(await Promise.all(entityIds.map(async uuid => [
-            uuid,
-            await this.queryTaskRows(uuid, start, end),
-          ] as const)))
-        }
-      }
-      else {
-        const uuid = entityIds[0]
-        rowsByEntity = new Map(uuid
-          ? [[uuid, await this.queryTaskRows(uuid, start, end)]]
-          : [])
-      }
+      const scopes = await this.resolveTaskScopes(params, entityIds, start, end)
+      const rowsByEntity = new Map(await Promise.all(entityIds.map(async uuid => [
+        uuid,
+        await this.queryTaskRows(uuid, start, end, 3_600_000, scopes),
+      ] as const)))
 
       for (const uuid of entityIds) {
         const rows = (rowsByEntity.get(uuid) ?? [])
@@ -1150,6 +1150,7 @@ export class NodeGetSource {
   }
 
   close(): void {
+    this.taskIdentities.clear()
     this.historyRequests.close(this.rpc)
     this.rpc.close()
   }
@@ -1320,11 +1321,68 @@ export class NodeGetSource {
     return downsampleEvenly(records, maxCount)
   }
 
+  private async resolveTaskScopes(
+    params: MetricQueryParams,
+    uuids: string[] | undefined,
+    start: number,
+    end: number,
+  ): Promise<TaskScope[]> {
+    const tags = params.tags ?? {}
+    if (Object.keys(tags).some(key => !['task_id', 'task_name', 'task_type'].includes(key)))
+      return []
+    const types = ['ping', 'tcp_ping'].filter(type => !tags.task_type || type === tags.task_type)
+    if (!types.length)
+      return []
+    const requestedIds = [...new Set([params.task_id, ...(params.task_ids ?? [])]
+      .filter(value => value !== undefined && value !== null && value !== '')
+      .map(String))]
+    const ids = tags.task_id === undefined
+      ? requestedIds
+      : requestedIds.length && !requestedIds.includes(tags.task_id)
+        ? []
+        : [tags.task_id]
+    if (tags.task_id !== undefined && !ids.length)
+      return []
+    const hasName = tags.task_name !== undefined
+    if (!ids.length && !hasName)
+      return types.map(type => ({ type }))
+    const belongsToSource = (id: string) => !this.taskSources.has(Number(id))
+      || this.taskSources.get(Number(id)) === this.key
+    if (ids.length && ids.every(id => !belongsToSource(id)))
+      return []
+
+    const identities = () => [...this.taskIdentities.values()]
+      .filter(identity => taskMatchesMetricQuery(identity, params))
+    const missingIdentity = () => ids.length
+      ? ids.some(id => belongsToSource(id) && !this.taskIdentities.has(Number(id)))
+      : types.some(type => !identities().some(identity => identity.type === type))
+    // Task IDs are compatibility hashes, not upstream task IDs. Reuse discovery
+    // already in progress, then discover only the selected nodes in a short window.
+    if (missingIdentity() && this.pingTaskRefreshPromise)
+      await this.pingTaskRefreshPromise.catch(() => undefined)
+    if (missingIdentity()) {
+      const nodes = uuids ?? (Object.keys(this.clientCache).length
+        ? Object.keys(this.clientCache)
+        : await this.listAgentUuids())
+      const discoveryStart = Math.max(start, end - PING_TASK_DISCOVERY_WINDOW_MS)
+      await Promise.all(nodes.map(uuid => this.queryTaskRows(
+        uuid, discoveryStart, end, PING_TASK_DISCOVERY_WINDOW_MS,
+      )))
+    }
+    const selected = identities()
+    if (ids.length && ids.some(belongsToSource) && ids.every(id => !this.taskIdentities.has(Number(id))))
+      throw new Error('Ping task metadata is unavailable in the recent node history; refresh the public Ping task list before retrying')
+    if (selected.some(identity => identity.cronSource === undefined))
+      throw new Error('The selected Ping task has no CronSource; query its node history without a task filter')
+    return selected.map(({ type, cronSource }) => ({ type, ...(cronSource === undefined ? {} : { cronSource }) }))
+  }
+
   private async queryTaskRows(
     uuid: string | undefined,
     start: number,
     end: number,
     windowMs = 3_600_000,
+    scopes: TaskScope[] = [{ type: 'ping' }, { type: 'tcp_ping' }],
   ): Promise<TaskRow[]> {
     const windows: Array<{ from: number, to: number }> = []
     for (let from = start; from < end; from += windowMs)
@@ -1335,8 +1393,8 @@ export class NodeGetSource {
     let successfulQueries = 0
     let firstFailure: unknown
     for (let index = 0; index < windows.length; index += 4) {
-      const batch = windows.slice(index, index + 4).flatMap(({ from, to }) => ['ping', 'tcp_ping'].map(type => (
-        this.queryTaskWindow(uuid, type, from, to, budget)
+      const batch = windows.slice(index, index + 4).flatMap(({ from, to }) => scopes.map(scope => (
+        this.queryTaskWindow(uuid, scope, from, to, budget)
       )))
 
       for (const result of await Promise.allSettled(batch)) {
@@ -1351,18 +1409,20 @@ export class NodeGetSource {
           rawRows.push(row)
       }
     }
-    if (windows.length && successfulQueries === 0)
+    if (windows.length && scopes.length && successfulQueries === 0)
       throw firstFailure ?? new Error('NodeGet task query failed')
 
     const unique = new Map<string, TaskRow>()
-    for (const { row, requestedType } of rawRows) {
+    for (const { row, requestedType, requestedCronSource } of rawRows) {
+      if (requestedCronSource !== undefined && row.cron_source !== requestedCronSource)
+        continue
       const result = isRecord(row.task_event_result) ? row.task_event_result : {}
       const valueCandidate = typeof result.ping === 'number' ? result.ping : result.tcp_ping
       const failed = row.success === false
       if ((typeof valueCandidate !== 'number' || !Number.isFinite(valueCandidate)) && !failed)
         continue
       const rowUuid = stringValue(row.uuid, uuid)
-      if (!rowUuid)
+      if (!rowUuid || (uuid && rowUuid !== uuid))
         continue
       const timestamp = timestampMs(row.timestamp ?? row.storage_time)
       if (!timestamp || timestamp < start || timestamp > end)
@@ -1376,6 +1436,11 @@ export class NodeGetSource {
       const target = stringValue(taskEvent[type])
       const name = stringValue(row.cron_source ?? row.task_name, target || type)
       const taskId = stablePositiveId(`${this.key}\u0000${type}\u0000${name}`)
+      this.taskIdentities.set(taskId, {
+        taskId, type, name,
+        ...(typeof row.cron_source === 'string' ? { cronSource: row.cron_source } : {}),
+      })
+      this.taskSources.set(taskId, this.key)
       unique.set(`${rowUuid}\u0000${taskId}\u0000${timestamp}`, {
         uuid: rowUuid,
         timestamp,
@@ -1393,7 +1458,7 @@ export class NodeGetSource {
 
   private async queryTaskWindow(
     uuid: string | undefined,
-    type: string,
+    scope: TaskScope,
     from: number,
     to: number,
     budget: TaskQueryBudget,
@@ -1403,13 +1468,17 @@ export class NodeGetSource {
     const condition: Record<string, unknown>[] = []
     if (uuid)
       condition.push({ uuid })
-    condition.push({ type }, { timestamp_from_to: [from, to] }, { limit: TASK_QUERY_LIMIT })
+    if (scope.cronSource !== undefined)
+      condition.push({ cron_source: scope.cronSource })
+    condition.push({ type: scope.type }, { timestamp_from_to: [from, to] }, { limit: TASK_QUERY_LIMIT })
     const response = await this.historyRequests.call<unknown>(this.rpc, 'task_query', { task_data_query: { condition } })
     const rows = arrayPayload(response)
     if (budget.failure)
       throw budget.failure
     if (rows.length < TASK_QUERY_LIMIT) {
-      return rows.flatMap((row): RawTaskRow[] => isRecord(row) ? [{ row, requestedType: type }] : [])
+      return rows.flatMap((row): RawTaskRow[] => isRecord(row)
+        ? [{ row, requestedType: scope.type, ...(scope.cronSource === undefined ? {} : { requestedCronSource: scope.cronSource }) }]
+        : [])
     }
 
     // NodeGet uses inclusive integer millisecond bounds and caps each result at
@@ -1425,8 +1494,8 @@ export class NodeGetSource {
     try {
       // Refine sequentially within the shared request budget. Each child RPC
       // acquires its own scheduler slot after the parent RPC has released it.
-      const left = await this.queryTaskWindow(uuid, type, from, midpoint, budget)
-      const right = await this.queryTaskWindow(uuid, type, midpoint + 1, to, budget)
+      const left = await this.queryTaskWindow(uuid, scope, from, midpoint, budget)
+      const right = await this.queryTaskWindow(uuid, scope, midpoint + 1, to, budget)
       return [...left, ...right]
     }
     catch (error) {
