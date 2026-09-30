@@ -547,7 +547,7 @@ describe('NodeGetSource', () => {
       .map(point => [point.value, point.count])).toEqual([[20, 1], [40, 1], [-1, 0], [-1, 0]])
   })
 
-  it('retrieves full multi-node Ping history after hitting the backend limit without losing split boundaries', async () => {
+  it('scopes multi-node Ping history to each requested node and preserves complete records', async () => {
     const start = Date.parse('2026-08-25T00:00:00.000Z')
     const end = start + 3_600_000
     const uuids = Array.from({ length: 24 }, (_, index) => `synthetic-node-${index}`)
@@ -572,7 +572,10 @@ describe('NodeGetSource', () => {
     }
     const multi = await source.queryMetrics({ ...params, entity_ids: uuids })
     expect(multi.series.reduce((count, series) => count + series.points.length, 0)).toBe(rows.length)
-    expect(caller.conditions.length).toBeLessThanOrEqual(8)
+    expect(caller.conditions).toHaveLength(uuids.length * 2)
+    expect(caller.conditions.every(conditions => uuids.some(uuid => (
+      conditions.some(condition => condition.uuid === uuid)
+    )))).toBe(true)
     const single = await source.queryMetrics({ ...params, entity_id: uuids[0]! })
     expect(multi.series.filter(series => series.entity_id === uuids[0])).toEqual(single.series)
   })
@@ -585,12 +588,15 @@ describe('NodeGetSource', () => {
     }))
     const caller = new LimitedTaskCaller(rows)
     const source = new NodeGetSource('Fixture', 'wss://nodeget.example/nodeget/rpc', caller)
+    const entityIds = [TEST_UUID, 'synthetic-other-node']
     await expect(source.queryMetrics({
-      entity_ids: [TEST_UUID, 'synthetic-other-node'], metric_keys: ['ping.latency_ms'],
+      entity_ids: entityIds, metric_keys: ['ping.latency_ms'],
       start: new Date(start).toISOString(), end: new Date(start + 60_000).toISOString(),
     })).rejects.toThrow('NodeGet Ping history exceeds the query limit')
     expect(caller.conditions.length).toBeLessThan(40)
-    expect(caller.conditions.every(conditions => conditions.every(condition => !Object.hasOwn(condition, 'uuid')))).toBe(true)
+    expect(caller.conditions.every(conditions => entityIds.some(uuid => (
+      conditions.some(condition => condition.uuid === uuid)
+    )))).toBe(true)
   })
 
   it('does not hide a failed refinement behind a successful empty query for the other task protocol', async () => {
