@@ -15,6 +15,7 @@ import type {
   PingRecordsResult,
 } from '../types'
 import type { NodeGetCaller } from './rpc-client'
+import { HistoryRequestScheduler } from './history-requests'
 import { rankPingTasks } from './ping-task-order'
 import {
   downsampleEvenly,
@@ -418,11 +419,12 @@ function metricValue(record: KomariStatusRecord, metricKey: string): number | nu
   }
 }
 
-function queryRange(
+export function queryRange(
   query: { start?: string, end?: string, hours?: number },
+  now: number,
 ): { start: number, end: number } {
-  const endCandidate = query.end ? Date.parse(query.end) : Date.now()
-  const end = Number.isFinite(endCandidate) ? endCandidate : Date.now()
+  const endCandidate = query.end ? Date.parse(query.end) : now
+  const end = Number.isFinite(endCandidate) ? endCandidate : now
   const startCandidate = query.start ? Date.parse(query.start) : end - Math.max(1, query.hours ?? 1) * 3_600_000
   const start = Number.isFinite(startCandidate) ? startCandidate : end - 3_600_000
   const from = Math.min(start, end)
@@ -684,6 +686,7 @@ export class NodeGetSource {
     name: string,
     backendUrl: string,
     private readonly rpc: NodeGetCaller,
+    private readonly historyRequests = new HistoryRequestScheduler(),
   ) {
     this.name = name || 'NodeGet'
     this.key = sourceKey(this.name, backendUrl)
@@ -814,7 +817,7 @@ export class NodeGetSource {
 
   async getRecentRecords(uuid: string, limit: number): Promise<KomariStatusRecord[]> {
     const safeLimit = Math.min(Math.max(Math.trunc(limit) || 1, 1), 1_000)
-    const response = await this.rpc.call<unknown>('agent_query_dynamic_summary', {
+    const response = await this.historyRequests.call<unknown>(this.rpc, 'agent_query_dynamic_summary', {
       query: {
         condition: [{ uuid }, { limit: safeLimit + 1 }],
         fields: DYNAMIC_FIELDS,
@@ -840,7 +843,7 @@ export class NodeGetSource {
   }
 
   async getLoadRecords(query: LoadRecordQuery): Promise<KomariStatusRecord[] | Record<string, KomariStatusRecord[]>> {
-    const { start, end } = queryRange(query)
+    const { start, end } = queryRange(query, this.historyRequests.queryTime())
     const ids = query.uuid
       ? [query.uuid]
       : Object.keys(this.clientCache).length
@@ -858,7 +861,7 @@ export class NodeGetSource {
   }
 
   async getPingRecords(query: PingRecordQuery): Promise<PingRecordsResult> {
-    const { start, end } = queryRange(query)
+    const { start, end } = queryRange(query, this.historyRequests.queryTime())
     const taskRows = await this.queryTaskRows(query.uuid, start, end)
     const filteredRows = query.taskId
       ? taskRows.filter(row => row.taskId === query.taskId)
@@ -892,7 +895,7 @@ export class NodeGetSource {
   }
 
   private async loadPingTasks(): Promise<KomariPingTask[]> {
-    const end = Date.now()
+    const end = this.historyRequests.queryTime()
     const recentStart = end - PING_TASK_DISCOVERY_WINDOW_MS
     const uuids = Object.keys(this.clientCache).length
       ? Object.keys(this.clientCache)
@@ -947,7 +950,7 @@ export class NodeGetSource {
       ...(params.start || params.start_time ? { start: params.start ?? params.start_time } : {}),
       ...(params.end || params.end_time ? { end: params.end ?? params.end_time } : {}),
       hours: params.hours ?? 4,
-    })
+    }, this.historyRequests.queryTime())
     const fillEmpty = params.fill_empty === true
     const series = [...new Set(entityIds.map(id => id.trim()).filter(Boolean))].flatMap(entityId => (
       metricKeys.map((metricKey): MetricSeries => {
@@ -990,7 +993,7 @@ export class NodeGetSource {
       ...(params.start || params.start_time ? { start: params.start ?? params.start_time } : {}),
       ...(params.end || params.end_time ? { end: params.end ?? params.end_time } : {}),
       hours: params.hours ?? 4,
-    })
+    }, this.historyRequests.queryTime())
     const requestedEntityIds = params.entity_ids?.length
       ? params.entity_ids
       : params.entity_id
@@ -1147,6 +1150,7 @@ export class NodeGetSource {
   }
 
   close(): void {
+    this.historyRequests.close(this.rpc)
     this.rpc.close()
   }
 
@@ -1273,7 +1277,8 @@ export class NodeGetSource {
     let successfulQueries = 0
     let firstFailure: unknown
     for (let index = 0; index < windows.length; index += 4) {
-      const batch = windows.slice(index, index + 4).map(({ from, to }) => this.rpc.call<unknown>(
+      const batch = windows.slice(index, index + 4).map(({ from, to }) => this.historyRequests.call<unknown>(
+        this.rpc,
         'agent_query_dynamic_summary',
         {
           query: {
@@ -1399,7 +1404,7 @@ export class NodeGetSource {
     if (uuid)
       condition.push({ uuid })
     condition.push({ type }, { timestamp_from_to: [from, to] }, { limit: TASK_QUERY_LIMIT })
-    const response = await this.rpc.call<unknown>('task_query', { task_data_query: { condition } })
+    const response = await this.historyRequests.call<unknown>(this.rpc, 'task_query', { task_data_query: { condition } })
     const rows = arrayPayload(response)
     if (budget.failure)
       throw budget.failure
@@ -1418,8 +1423,8 @@ export class NodeGetSource {
     budget.remainingSplits -= 2
     const midpoint = Math.floor(from + (to - from) / 2)
     try {
-      // Keep each split sequential so refinement does not increase the existing
-      // eight-request concurrency limit. The budget is shared by all time windows.
+      // Refine sequentially within the shared request budget. Each child RPC
+      // acquires its own scheduler slot after the parent RPC has released it.
       const left = await this.queryTaskWindow(uuid, type, from, midpoint, budget)
       const right = await this.queryTaskWindow(uuid, type, midpoint + 1, to, budget)
       return [...left, ...right]

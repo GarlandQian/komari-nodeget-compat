@@ -522,24 +522,26 @@ export class KomariFacade {
     const taskId = rawTaskId > 0 ? rawTaskId : undefined
     const requestedMaxCount = numberParameter(params, ['maxCount', 'max_count'], 7, 4_000)
     const maxCount = requestedMaxCount === 0 ? 4_000 : requestedMaxCount
-    const range = responseRange(start, end, hours)
+    const timeRange = { hours, ...(start ? { start } : {}), ...(end ? { end } : {}) }
+    const resolvedRange = this.provider.resolveHistoryRange?.(timeRange)
+    const range = resolvedRange
+      ? { from: resolvedRange.start, to: resolvedRange.end }
+      : responseRange(start, end, hours)
     if (type === 'ping') {
       const result = await this.provider.getPingRecords({
         ...(uuid ? { uuid } : {}),
         ...(taskId ? { taskId } : {}),
-        hours,
         maxCount,
-        ...(start ? { start } : {}),
-        ...(end ? { end } : {}),
+        ...timeRange,
+        ...resolvedRange,
       })
       return { ...result, ...range }
     }
     const records = await this.provider.getLoadRecords({
       ...(uuid ? { uuid } : {}),
-      hours,
       maxCount,
-      ...(start ? { start } : {}),
-      ...(end ? { end } : {}),
+      ...timeRange,
+      ...resolvedRange,
     })
     const grouped = groupedLoadRecords(records, uuid)
     const projected = projectLoadRecords(grouped, loadType)
@@ -563,26 +565,28 @@ export class KomariFacade {
     const loadType = url.searchParams.get('load_type') ?? ''
     if (!LOAD_TYPES.has(loadType))
       throw new RpcFault(-32602, `Invalid load_type parameter: ${loadType}`)
-    const range = responseRange(start, end, hours)
+    const timeRange = { hours, ...(start ? { start } : {}), ...(end ? { end } : {}) }
+    const resolvedRange = this.provider.resolveHistoryRange?.(timeRange)
+    const range = resolvedRange
+      ? { from: resolvedRange.start, to: resolvedRange.end }
+      : responseRange(start, end, hours)
     if (type === 'ping') {
       const rawTaskId = finiteNumber(url.searchParams.get('task_id'), 0)
       const taskId = rawTaskId > 0 ? rawTaskId : undefined
       const result = await this.provider.getPingRecords({
         ...(uuid ? { uuid } : {}),
         ...(taskId ? { taskId } : {}),
-        hours,
         maxCount,
-        ...(start ? { start } : {}),
-        ...(end ? { end } : {}),
+        ...timeRange,
+        ...resolvedRange,
       })
       return apiSuccess({ ...result, ...range })
     }
     const records = await this.provider.getLoadRecords({
       ...(uuid ? { uuid } : {}),
-      hours,
       maxCount,
-      ...(start ? { start } : {}),
-      ...(end ? { end } : {}),
+      ...timeRange,
+      ...resolvedRange,
     })
     const projected = projectLoadRecords(records, loadType)
     return apiSuccess({

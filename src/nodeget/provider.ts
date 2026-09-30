@@ -20,9 +20,10 @@ import type {
   ThemeSettingValueType,
 } from '../types'
 import type { NodeGetCaller } from './rpc-client'
+import { HistoryRequestScheduler } from './history-requests'
 import { asStringArray, downsampleGroupsProportionally, finiteNumber, isRecord } from '../shared/utils'
 import { NodeGetRpcClient, NodeGetRpcError } from './rpc-client'
-import { NodeGetSource } from './source'
+import { NodeGetSource, queryRange } from './source'
 
 interface ClientRoute {
   source: NodeGetSource
@@ -146,6 +147,7 @@ function isPermissionDenied(error: unknown): boolean {
 }
 
 export class NodeGetMonitorProvider implements MonitorProvider {
+  private readonly historyRequests = new HistoryRequestScheduler()
   private readonly sources: NodeGetSource[]
   private readonly routes = new Map<string, ClientRoute>()
   private readonly publicIdBySourceAndRaw = new Map<string, string>()
@@ -164,6 +166,7 @@ export class NodeGetMonitorProvider implements MonitorProvider {
         entry.name?.trim() || `NodeGet ${index + 1}`,
         entry.backend_url,
         createCaller(entry),
+        this.historyRequests,
       ))
   }
 
@@ -302,6 +305,11 @@ export class NodeGetMonitorProvider implements MonitorProvider {
     return records.map(record => cloneRecord(record, uuid))
   }
 
+  resolveHistoryRange(query: Pick<LoadRecordQuery, 'start' | 'end' | 'hours'>): { start: string, end: string } {
+    const { start, end } = queryRange(query, this.historyRequests.queryTime())
+    return { start: new Date(start).toISOString(), end: new Date(end).toISOString() }
+  }
+
   async getLoadRecords(query: LoadRecordQuery): Promise<KomariStatusRecord[] | Record<string, KomariStatusRecord[]>> {
     await this.ensureRoutes()
     if (query.uuid) {
@@ -427,6 +435,7 @@ export class NodeGetMonitorProvider implements MonitorProvider {
   }
 
   close(): void {
+    this.historyRequests.close()
     for (const source of this.sources)
       source.close()
   }

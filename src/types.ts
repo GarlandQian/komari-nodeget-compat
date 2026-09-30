@@ -250,6 +250,7 @@ export interface MonitorProvider {
   getClients(): Promise<Record<string, KomariClient>>
   getLatestStatuses(uuids?: string[]): Promise<Record<string, KomariNodeStatus>>
   getRecentRecords(uuid: string, limit: number): Promise<KomariStatusRecord[]>
+  resolveHistoryRange?(query: Pick<LoadRecordQuery, 'start' | 'end' | 'hours'>): { start: string, end: string }
   getLoadRecords(query: LoadRecordQuery): Promise<KomariStatusRecord[] | Record<string, KomariStatusRecord[]>>
   getPingRecords(query: PingRecordQuery): Promise<PingRecordsResult>
   getPingTasks(): Promise<KomariPingTask[]>
