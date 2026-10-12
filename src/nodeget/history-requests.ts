@@ -1,7 +1,7 @@
 import type { NodeGetCaller } from './rpc-client'
 import { NodeGetRpcError } from './rpc-client'
 
-type HistoryMethod = 'agent_query_dynamic_summary' | 'task_query'
+type HistoryMethod = 'agent_query_dynamic_summary' | 'task_query' | 'agent_query_traffic' | 'agent_query_traffic_current'
 
 interface HistoryRequestOptions {
   concurrency?: 1 | 2
@@ -15,6 +15,7 @@ interface HistoryRequest {
   key: string
   method: HistoryMethod
   params: Record<string, unknown>
+  timeoutMs?: number
   promise: Promise<unknown>
   controller: AbortController
   resolve: (value: unknown) => void
@@ -72,7 +73,12 @@ export class HistoryRequestScheduler {
     return this.timeAnchor.value
   }
 
-  call<T>(caller: NodeGetCaller, method: HistoryMethod, params: Record<string, unknown>): Promise<T> {
+  call<T>(
+    caller: NodeGetCaller,
+    method: HistoryMethod,
+    params: Record<string, unknown>,
+    options: { timeoutMs?: number } = {},
+  ): Promise<T> {
     if (this.closed || this.closedCallers.has(caller))
       return Promise.reject(new NodeGetRpcError('NodeGet history requests are closed'))
 
@@ -98,7 +104,10 @@ export class HistoryRequestScheduler {
         resolve = onResolve
         reject = onReject
       })
-      request = { caller, key, method, params, promise, controller: new AbortController(), resolve, reject }
+      request = {
+        caller, key, method, params, promise, controller: new AbortController(), resolve, reject,
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      }
       this.pending.set(key, request)
       this.queue.push(request)
       this.drain()
@@ -147,7 +156,10 @@ export class HistoryRequestScheduler {
 
   private async execute(request: HistoryRequest): Promise<void> {
     try {
-      const value = await request.caller.call<unknown>(request.method, request.params, { signal: request.controller.signal })
+      const value = await request.caller.call<unknown>(request.method, request.params, {
+        signal: request.controller.signal,
+        ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
+      })
       if (this.pending.get(request.key) !== request)
         return
       this.pending.delete(request.key)

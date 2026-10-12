@@ -36,6 +36,26 @@ NodeGet 当前版本可使用下面的 `token_limit`。它允许列出节点并�
 
 不要授予 `Task::Create/Write/Delete`、KV 写入/删除、Terminal、Crontab 写入、配置读写、执行命令、WebShell、HTTP Request、自更新、JS Worker 或数据库权限。
 
+## NodeGet 0.6.0 原生流量（可选）
+
+适配层支持正式版 0.6.0 的 `agent_query_traffic_current` 和 `agent_query_traffic`。希望使用原生累计流量、以及已配置的 `extension-traffic` 计费周期用量时，在主题 Token 原有 `permissions` 中追加下面这一项，并让对应 Scope 覆盖需要展示的节点：
+
+```json
+{ "dynamic_monitoring": { "read": "network" } }
+```
+
+面板的“本机 纯监控 / 监控+ping”预设不会自动增加这项权限。没有它时，适配层继续使用监控摘要和扩展元数据，不影响 CPU、内存、网速及 Ping。
+
+- Server 和 Agent 均需支持 0.6.0 的新流量字段，并启用完整动态上报 `agent_report_dynamic`；仅摘要上报或旧 Agent 无法生成原生累计。
+- 当前累计来自服务端内存，不要求快照 Worker；它从新统计开始时累加，不能补回启用之前的流量。
+- 周期用量需要服务端运行 `traffic-snapshot-worker`，且每块网卡在周期起点及之后已有快照。适配层按 `metadata_traffic_period_start` 查询，保留各方向的独立用量，不减去旧扩展的累计基线。
+- 周期结果采用 0.6.0 的 `total` 查询，省略 `end_time`，使用落库后的累计值，通常有约 60 秒写入延迟；该接口不返回落库时间，客户端缓存期限无法检测服务端写入停滞。起点按快照对齐，默认快照间隔 15 分钟，不能视为精确到秒的用量。
+- 新接口在后台刷新，首次响应可先显示原有结果。它们共享最多 2 个请求的队列、重复请求合并和 10 秒缓存；失败会退避，旧原生结果最多复用 30 秒。空结果、缺字段、网卡覆盖不完整或有已报告数据丢失的周期结果均回退，不当作 `0B`。
+- 原生累计中任一网卡的上报时间落后监控摘要超过 2 分钟时，会保守回退；停用或更名后仍保留旧累计的网卡也可能触发此回退。
+- 原生流量只覆盖当前状态的累计/周期数值；实时网速、历史图表及逐次采样增量继续使用摘要。公开主题 Token 无需快照写入、清理或 Worker 管理权限。
+
+接口依据：[0.6.0 流量说明](https://github.com/NodeSeekDev/NodeGet/blob/v0.6.0/docs/guide/features/traffic.md)。0.6.0 上游在单方向计数器重置时可能重复累计另一方向，适配层无法校正服务端已累计的数据；该问题在后续预发布版修复。本次仅接入 0.6.0 的流量查询协议。
+
 ## 在 NodeGet 中配置
 
 转换包的 `config.json` 会故意保留空的 `site_tokens`，不要在转换器、GitHub 或 Cloudflare 中配置真实 Token。导入后打开：

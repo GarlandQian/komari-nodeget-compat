@@ -16,6 +16,7 @@ import type {
 } from '../types'
 import type { NodeGetCaller } from './rpc-client'
 import { HistoryRequestScheduler } from './history-requests'
+import { NodeGetTrafficReader } from './native-traffic'
 import { rankPingTasks } from './ping-task-order'
 import {
   downsampleEvenly,
@@ -60,6 +61,7 @@ const TRAFFIC_EXTENSION_BILLING_MODES = new Set(['quota', 'payg'])
 const TRAFFIC_EXTENSION_PERIODS = new Set(['hourly', 'daily', 'weekly', 'monthly', 'never'])
 const TRAFFIC_PERIOD_CACHE_TTL_MS = 60_000
 const TRAFFIC_PERIOD_RETRY_MS = 15_000
+const NATIVE_TRAFFIC_MAX_REPORT_LAG_MS = 120_000
 const PING_TASK_DISCOVERY_WINDOW_MS = 3_600_000
 const PING_TASK_FALLBACK_WINDOW_MS = 24 * 3_600_000
 const TASK_QUERY_LIMIT = 10_000
@@ -693,6 +695,7 @@ export class NodeGetSource {
   private pingTaskCache: { expiresAt: number, tasks: KomariPingTask[] } | null = null
   private pingTaskRefreshPromise: Promise<KomariPingTask[]> | null = null
   private readonly taskIdentities = new Map<number, TaskIdentity>()
+  private readonly nativeTraffic: NodeGetTrafficReader
 
   constructor(
     name: string,
@@ -703,6 +706,7 @@ export class NodeGetSource {
   ) {
     this.name = name || 'NodeGet'
     this.key = sourceKey(this.name, backendUrl)
+    this.nativeTraffic = new NodeGetTrafficReader(rpc, historyRequests)
   }
 
   async getClients(): Promise<Record<string, KomariClient>> {
@@ -820,9 +824,23 @@ export class NodeGetSource {
       }
       const currentRow = row ?? {}
       const rawTraffic = rawTrafficState(currentRow)
-      statuses[uuid] = this.toStatus(uuid, currentRow, now, this.latestRawTrafficCache[uuid], true)
-      if (rawTraffic.timestamp > 0)
+      const status = this.toStatus(uuid, currentRow, now, this.latestRawTrafficCache[uuid], true)
+      if (rawTraffic.timestamp > 0) {
+        const period = this.trafficPeriodCache[uuid]
+        // Keep native counters separate from summary samples and extension baselines.
+        // Optional reads refresh in the background so history queues cannot delay live status.
+        const native = period?.enabled
+          ? period.start > 0 && period.start <= now
+            ? this.nativeTraffic.read(uuid, period.start)
+            : undefined
+          : this.nativeTraffic.read(uuid)
+        if (native && native.updatedAt >= rawTraffic.timestamp - NATIVE_TRAFFIC_MAX_REPORT_LAG_MS) {
+          status.net_total_up = native.up
+          status.net_total_down = native.down
+        }
         this.latestRawTrafficCache[uuid] = rawTraffic
+      }
+      statuses[uuid] = status
     }
     this.statusCache = { ...this.statusCache, ...statuses }
     return statuses
@@ -1150,6 +1168,7 @@ export class NodeGetSource {
   }
 
   close(): void {
+    this.nativeTraffic.close()
     this.taskIdentities.clear()
     this.historyRequests.close(this.rpc)
     this.rpc.close()
